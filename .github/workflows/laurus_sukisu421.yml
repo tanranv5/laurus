@@ -16,13 +16,13 @@ name: build-laurus-sukisu-421
         required: true
         default: "v4.2.1"
       sukisu_mode:
-        description: "SukiSU 集成模式：builtin 更适合非 GKI/老内核"
+        description: "SukiSU 集成模式：builtin=CONFIG_KSU=y（老内核推荐），lkm=CONFIG_KSU=m"
         required: true
         default: "builtin"
         type: choice
         options:
           - builtin
-          - main
+          - lkm
       fortify:
         description: "是否启用 FORTIFY_SOURCE（推荐日用 on；老 GCC 4.9 需先修触发点再开启）"
         required: true
@@ -130,17 +130,12 @@ jobs:
           ref="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_ref || 'main' }}"
           mode="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_mode || 'builtin' }}"
 
-          # SukiSU 官方脚本
-          curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${ref}/kernel/setup.sh" | bash -s "$mode"
+          # SukiSU 官方脚本：第一个参数是 tag/commit，必须传 ref（传 mode 会 checkout 出错误分支）
+          curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${ref}/kernel/setup.sh" | bash -s "$ref"
 
-          # 应用 manual hook 补丁（4.14）
-          patch_url="https://raw.githubusercontent.com/rksuorg/kernel_patches/master/manual_hook/kernel-4.14.patch"
-          curl -fsSL "$patch_url" -o /tmp/ksu_manual_hook.patch
-          if git apply --reverse --check /tmp/ksu_manual_hook.patch; then
-            echo "manual hook patch already applied"
-          else
-            git apply /tmp/ksu_manual_hook.patch
-          fi
+          # v4.2.1 走 syscall table hook（patch_memory 动态改写 sys_call_table），
+          # 不再需要 rksu manual_hook 内核补丁，故此处不再应用。
+          echo "SukiSU ref=${ref} / mode=${mode} integrated"
 
           # 补齐 manual hook 适配符号，避免链接错误
           if [ -d "common/drivers" ]; then
@@ -837,6 +832,7 @@ jobs:
 
           DEFCONFIG="${{ github.event_name == 'workflow_dispatch' && inputs.defconfig || 'vendor/laurus-perf_defconfig' }}"
           DEFCONFIG_PATH="arch/arm64/configs/${DEFCONFIG}"
+          mode="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_mode || 'builtin' }}"
 
           if [ ! -f "${DEFCONFIG_PATH}" ]; then
             echo "defconfig 不存在：${DEFCONFIG_PATH}"
@@ -849,33 +845,24 @@ jobs:
           rm -f .scmversion
 
           if [ "$WITH_SUKISU" = "on" ]; then
-            # non-GKI 使用 manual hook
-            sed -i -E '/^CONFIG_KSU=/d' "${DEFCONFIG_PATH}"
+            # v4.2.1 Kconfig 只保留 KSU/KSU_MANUAL_SU/KPM 等开关，
+            # 旧的 KSU_MANUAL_HOOK、KSU_SUSFS* 已不存在，不能写入 defconfig。
+            sed -i -E '/^CONFIG_KSU/d' "${DEFCONFIG_PATH}"
             sed -i -E '/^# CONFIG_KSU is not set/d' "${DEFCONFIG_PATH}"
-            sed -i -E '/^CONFIG_KSU_MANUAL_HOOK/d' "${DEFCONFIG_PATH}"
-            sed -i -E '/^# CONFIG_KSU_MANUAL_HOOK is not set/d' "${DEFCONFIG_PATH}"
-            sed -i -E '/^CONFIG_KSU_MANUAL_SU/d' "${DEFCONFIG_PATH}"
-            sed -i -E '/^# CONFIG_KSU_MANUAL_SU is not set/d' "${DEFCONFIG_PATH}"
+            sed -i -E '/^CONFIG_KPM/d' "${DEFCONFIG_PATH}"
             printf '%s\n' \
               'CONFIG_KSU=y' \
-              'CONFIG_KSU_MANUAL_HOOK=y' \
-              '# CONFIG_KSU_MANUAL_SU is not set' \
               'CONFIG_KPM=y' \
               'CONFIG_KPROBES=y' \
               'CONFIG_KRETPROBES=y' \
               'CONFIG_KPROBE_EVENTS=y' \
               'CONFIG_KALLSYMS=y' \
               'CONFIG_KALLSYMS_ALL=y' \
+              'CONFIG_EXT4_FS=y' \
               'CONFIG_SECURITYFS=y' \
               'CONFIG_DEVTMPFS=y' \
               'CONFIG_DEVTMPFS_MOUNT=y' \
               'CONFIG_OVERLAY_FS=y' \
-              'CONFIG_KSU_SUSFS=y' \
-              'CONFIG_KSU_SUSFS_SUS_KSTAT=y' \
-              'CONFIG_KSU_SUSFS_SPOOF_UNAME=y' \
-              'CONFIG_KSU_SUSFS_ENABLE_LOG=y' \
-              'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y' \
-              'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y' \
               >> "${DEFCONFIG_PATH}"
           fi
 
@@ -883,34 +870,23 @@ jobs:
           make O=out "$DEFCONFIG"
 
           if [ "$WITH_SUKISU" = "on" ]; then
-            # KernelSU：manual hook 路线
-            ./scripts/config --file out/.config -e KSU || true
-            ./scripts/config --file out/.config -e KSU_MANUAL_HOOK || true
-            ./scripts/config --file out/.config -d KSU_MANUAL_SU || true
+            # builtin = KSU 编进内核；lkm = 编译成模块
+            if [ "$mode" = "builtin" ]; then
+              ./scripts/config --file out/.config -e KSU || true
+            else
+              ./scripts/config --file out/.config -m KSU || true
+            fi
             ./scripts/config --file out/.config -e KPM || true
             ./scripts/config --file out/.config -e KPROBES || true
             ./scripts/config --file out/.config -e KRETPROBES || true
             ./scripts/config --file out/.config -e KPROBE_EVENTS || true
             ./scripts/config --file out/.config -e KALLSYMS || true
             ./scripts/config --file out/.config -e KALLSYMS_ALL || true
+            ./scripts/config --file out/.config -e EXT4_FS || true
             ./scripts/config --file out/.config -e SECURITYFS || true
             ./scripts/config --file out/.config -e DEVTMPFS || true
             ./scripts/config --file out/.config -e DEVTMPFS_MOUNT || true
             ./scripts/config --file out/.config -e OVERLAY_FS || true
-
-            # SUSFS
-            ./scripts/config --file out/.config -e KSU_SUSFS || true
-            ./scripts/config --file out/.config -e KSU_SUSFS_SUS_KSTAT || true
-            ./scripts/config --file out/.config -e KSU_SUSFS_SPOOF_UNAME || true
-            ./scripts/config --file out/.config -e KSU_SUSFS_ENABLE_LOG || true
-            ./scripts/config --file out/.config -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS || true
-            ./scripts/config --file out/.config -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_PATH || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_MOUNT || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_OPEN_REDIRECT || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_SU || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_MAP || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_TRY_UMOUNT || true
           fi
 
           # 保持 MODULE_SIG 以对齐 struct module，但关闭强制签名校验
@@ -939,34 +915,23 @@ jobs:
           make O=out olddefconfig
 
           if [ "$WITH_SUKISU" = "on" ]; then
-            # olddefconfig 后确认 manual hook 仍保持开启
-            ./scripts/config --file out/.config -e KSU || true
-            ./scripts/config --file out/.config -e KSU_MANUAL_HOOK || true
-            ./scripts/config --file out/.config -d KSU_MANUAL_SU || true
+            # olddefconfig 后再次确认 KSU 等关键项仍在
+            if [ "$mode" = "builtin" ]; then
+              ./scripts/config --file out/.config -e KSU || true
+            else
+              ./scripts/config --file out/.config -m KSU || true
+            fi
             ./scripts/config --file out/.config -e KPM || true
             ./scripts/config --file out/.config -e KPROBES || true
             ./scripts/config --file out/.config -e KRETPROBES || true
             ./scripts/config --file out/.config -e KPROBE_EVENTS || true
             ./scripts/config --file out/.config -e KALLSYMS || true
             ./scripts/config --file out/.config -e KALLSYMS_ALL || true
+            ./scripts/config --file out/.config -e EXT4_FS || true
             ./scripts/config --file out/.config -e SECURITYFS || true
             ./scripts/config --file out/.config -e DEVTMPFS || true
             ./scripts/config --file out/.config -e DEVTMPFS_MOUNT || true
             ./scripts/config --file out/.config -e OVERLAY_FS || true
-
-            # SUSFS (second round)
-            ./scripts/config --file out/.config -e KSU_SUSFS || true
-            ./scripts/config --file out/.config -e KSU_SUSFS_SUS_KSTAT || true
-            ./scripts/config --file out/.config -e KSU_SUSFS_SPOOF_UNAME || true
-            ./scripts/config --file out/.config -e KSU_SUSFS_ENABLE_LOG || true
-            ./scripts/config --file out/.config -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS || true
-            ./scripts/config --file out/.config -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_PATH || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_MOUNT || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_OPEN_REDIRECT || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_SU || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_MAP || true
-            ./scripts/config --file out/.config -d KSU_SUSFS_TRY_UMOUNT || true
 
             # 再次确保模块签名/版本字符串设置生效
             ./scripts/config --file out/.config -e MODULE_SIG || true
@@ -978,12 +943,17 @@ jobs:
 
             make O=out olddefconfig
 
-            if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
-              echo "CONFIG_KSU_MANUAL_HOOK 未开启，停止构建"
+            if ! grep -q '^CONFIG_KSU=y' out/.config; then
+              echo "CONFIG_KSU 未开启（builtin 模式需要 =y），停止构建"
+              grep -n 'KSU' out/.config || true
               exit 1
             fi
-            if ! grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
-              echo "CONFIG_KSU_SUSFS 未开启，停止构建"
+            if ! grep -q '^CONFIG_KPROBES=y' out/.config; then
+              echo "CONFIG_KPROBES 未开启（KSU depends on KPROBES），停止构建"
+              exit 1
+            fi
+            if ! grep -q '^CONFIG_EXT4_FS=y' out/.config; then
+              echo "CONFIG_EXT4_FS 未开启（KSU depends on EXT4_FS），停止构建"
               exit 1
             fi
           fi
