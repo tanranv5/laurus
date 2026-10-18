@@ -854,7 +854,7 @@ jobs:
               'CONFIG_KSU=y' \
               'CONFIG_KSU_MANUAL_HOOK=y' \
               '# CONFIG_KSU_MANUAL_SU is not set' \
-              'CONFIG_KPM=y' \
+              '# CONFIG_KPM is not set' \
               'CONFIG_KPROBES=y' \
               'CONFIG_KRETPROBES=y' \
               'CONFIG_KPROBE_EVENTS=y' \
@@ -881,7 +881,7 @@ jobs:
             ./scripts/config --file out/.config -e KSU || true
             ./scripts/config --file out/.config -e KSU_MANUAL_HOOK || true
             ./scripts/config --file out/.config -d KSU_MANUAL_SU || true
-            ./scripts/config --file out/.config -e KPM || true
+            ./scripts/config --file out/.config -d KPM || true
             ./scripts/config --file out/.config -e KPROBES || true
             ./scripts/config --file out/.config -e KRETPROBES || true
             ./scripts/config --file out/.config -e KPROBE_EVENTS || true
@@ -937,7 +937,7 @@ jobs:
             ./scripts/config --file out/.config -e KSU || true
             ./scripts/config --file out/.config -e KSU_MANUAL_HOOK || true
             ./scripts/config --file out/.config -d KSU_MANUAL_SU || true
-            ./scripts/config --file out/.config -e KPM || true
+            ./scripts/config --file out/.config -d KPM || true
             ./scripts/config --file out/.config -e KPROBES || true
             ./scripts/config --file out/.config -e KRETPROBES || true
             ./scripts/config --file out/.config -e KPROBE_EVENTS || true
