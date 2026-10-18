@@ -12,9 +12,9 @@ name: build-laurus-sukisu
         required: true
         default: "vendor/laurus-perf_defconfig"
       sukisu_ref:
-        description: "SukiSU Ultra 引用（分支/标签/commit）"
+        description: "SukiSU Ultra 引用（分支/标签/commit，已钉死，勿改）"
         required: true
-        default: "v4.1.2"
+        default: "0c874e16534b9654f220428db9807485b476180c"
       sukisu_mode:
         description: "SukiSU 集成模式：builtin 更适合非 GKI/老内核"
         required: true
@@ -127,7 +127,7 @@ jobs:
             exit 0
           fi
 
-          ref="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_ref || 'v4.1.2' }}"
+          ref="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_ref || '0c874e16534b9654f220428db9807485b476180c' }}"
           mode="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_mode || 'builtin' }}"
 
           # SukiSU 官方脚本
@@ -818,41 +818,6 @@ jobs:
 
           echo "SUSFS v2.0.0 minimal integration complete"
 
-      - name: 4.14 兼容补丁（MODULE_IMPORT_NS）
-        id: compat414
-        run: |
-          set -euxo pipefail
-          if [ "${WITH_SUKISU}" != "on" ]; then
-            echo "WITH_SUKISU=${WITH_SUKISU}, skip compat patch."
-            exit 0
-          fi
-          python3 - <<'PY'
-          from pathlib import Path
-
-          base = Path("drivers/kernelsu")
-          if not base.exists():
-              base = Path("common/drivers/kernelsu")
-          if not base.exists():
-              raise SystemExit("kernelsu dir not found")
-
-          changed = []
-          for p in base.rglob("*.c"):
-              txt = p.read_text()
-              if "MODULE_IMPORT_NS(" not in txt or "KSU_COMPAT_NO_MODULE_IMPORT_NS" in txt:
-                  continue
-              guard = (
-                  "#include <linux/version.h>\n"
-                  "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)\n"
-                  "#ifndef MODULE_IMPORT_NS /* KSU_COMPAT_NO_MODULE_IMPORT_NS */\n"
-                  "#define MODULE_IMPORT_NS(ns)\n"
-                  "#endif\n"
-                  "#endif\n"
-              )
-              p.write_text(guard + txt)
-              changed.append(str(p))
-          print("MODULE_IMPORT_NS compat patched:", changed)
-          PY
-
       - name: 配置 defconfig
         id: config
         run: |
@@ -889,7 +854,7 @@ jobs:
               'CONFIG_KSU=y' \
               'CONFIG_KSU_MANUAL_HOOK=y' \
               '# CONFIG_KSU_MANUAL_SU is not set' \
-              '# CONFIG_KPM is not set' \
+              'CONFIG_KPM=y' \
               'CONFIG_KPROBES=y' \
               'CONFIG_KRETPROBES=y' \
               'CONFIG_KPROBE_EVENTS=y' \
@@ -1007,23 +972,13 @@ jobs:
 
             make O=out olddefconfig
 
-            # v4.1.2 的 Kconfig 没有 KSU_MANUAL_HOOK（走 syscall hook），仅在该选项存在时校验
-            if grep -rq 'config KSU_MANUAL_HOOK' drivers/kernelsu/Kconfig common/drivers/kernelsu/Kconfig 2>/dev/null; then
-              if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
-                echo "CONFIG_KSU_MANUAL_HOOK 未开启，停止构建"
-                exit 1
-              fi
-            else
-              echo "当前 SukiSU 无 KSU_MANUAL_HOOK 选项（v4.1.2 使用 syscall hook），跳过校验"
+            if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
+              echo "CONFIG_KSU_MANUAL_HOOK 未开启，停止构建"
+              exit 1
             fi
-            # v4.1.2 的 Kconfig 没有 KSU_SUSFS（SUSFS 由内核侧 fs/susfs.c 提供），仅在该选项存在时校验
-            if grep -rq 'config KSU_SUSFS' drivers/kernelsu/Kconfig common/drivers/kernelsu/Kconfig 2>/dev/null; then
-              if ! grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
-                echo "CONFIG_KSU_SUSFS 未开启，停止构建"
-                exit 1
-              fi
-            else
-              echo "当前 SukiSU 无 KSU_SUSFS 选项（v4.1.2 由 fs/susfs.c 提供），跳过校验"
+            if ! grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
+              echo "CONFIG_KSU_SUSFS 未开启，停止构建"
+              exit 1
             fi
           fi
 
