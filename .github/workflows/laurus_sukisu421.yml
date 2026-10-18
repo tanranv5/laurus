@@ -229,6 +229,23 @@ jobs:
           '''
               p.write_text(head + s + "\n#endif /* KSU_FILE_WRAPPER_STUB */\n")
               print("patched infra/file_wrapper.c: stub for < 5.7")
+
+          # 4.14 没有 seccomp action cache（SECCOMP_ARCH_NATIVE_NR 是 5.5+）
+          p = d / "infra/seccomp_cache.c"
+          s = p.read_text()
+          if "KSU_SECCOMP_STUB" not in s:
+              head = '''#include <linux/version.h>
+          #include <linux/seccomp.h>
+          #include <linux/fs.h>
+
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 5, 0) /* KSU_SECCOMP_STUB */
+          void ksu_seccomp_clear_cache(struct seccomp_filter *filter, int nr) { }
+          void ksu_seccomp_allow_cache(struct seccomp_filter *filter, int nr) { }
+
+          #else
+          '''
+              p.write_text(head + s + "\n#endif /* KSU_SECCOMP_STUB */\n")
+              print("patched infra/seccomp_cache.c: stub for < 5.5")
           PYEOF
 
           # 4.14 缺 nofault 系列（5.8+ 才有），补一个强制包含的兼容头
