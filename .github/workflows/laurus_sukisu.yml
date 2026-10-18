@@ -818,6 +818,41 @@ jobs:
 
           echo "SUSFS v2.0.0 minimal integration complete"
 
+      - name: 4.14 兼容补丁（MODULE_IMPORT_NS）
+        id: compat414
+        run: |
+          set -euxo pipefail
+          if [ "${WITH_SUKISU}" != "on" ]; then
+            echo "WITH_SUKISU=${WITH_SUKISU}, skip compat patch."
+            exit 0
+          fi
+          python3 - <<'PY'
+          from pathlib import Path
+
+          base = Path("drivers/kernelsu")
+          if not base.exists():
+              base = Path("common/drivers/kernelsu")
+          if not base.exists():
+              raise SystemExit("kernelsu dir not found")
+
+          changed = []
+          for p in base.rglob("*.c"):
+              txt = p.read_text()
+              if "MODULE_IMPORT_NS(" not in txt or "KSU_COMPAT_NO_MODULE_IMPORT_NS" in txt:
+                  continue
+              guard = (
+                  "#include <linux/version.h>\n"
+                  "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)\n"
+                  "#ifndef MODULE_IMPORT_NS /* KSU_COMPAT_NO_MODULE_IMPORT_NS */\n"
+                  "#define MODULE_IMPORT_NS(ns)\n"
+                  "#endif\n"
+                  "#endif\n"
+              )
+              p.write_text(guard + txt)
+              changed.append(str(p))
+          print("MODULE_IMPORT_NS compat patched:", changed)
+          PY
+
       - name: 配置 defconfig
         id: config
         run: |
