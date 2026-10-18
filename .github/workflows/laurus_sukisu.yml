@@ -168,53 +168,11 @@ jobs:
               with urllib.request.urlopen(url, timeout=30) as resp:
                   return resp.read().decode("utf-8")
 
-          def patch_module_import_ns(base: Path) -> bool:
-              """4.14 没有 MODULE_IMPORT_NS（5.4+ 才有），给用到它的源文件加空宏兜底"""
-              changed = False
-              for p in base.rglob("*.c"):
-                  txt = p.read_text()
-                  if "MODULE_IMPORT_NS(" not in txt or "KSU_COMPAT_NO_MODULE_IMPORT_NS" in txt:
-                      continue
-                  guard = (
-                      "#include <linux/version.h>\n"
-                      "#if LINUX_VERSION_CODE < KERNEL_VERSION(5, 4, 0)\n"
-                      "#ifndef MODULE_IMPORT_NS /* KSU_COMPAT_NO_MODULE_IMPORT_NS */\n"
-                      "#define MODULE_IMPORT_NS(ns)\n"
-                      "#endif\n"
-                      "#endif\n"
-                  )
-                  p.write_text(guard + txt)
-                  changed = True
-                  print(f"patched MODULE_IMPORT_NS: {p}")
-              return changed
-
           def patch_arch_h(path: Path) -> bool:
               if not path.exists():
                   return False
               txt = path.read_text()
               if "KERNEL_VERSION(4, 17, 0)" in txt:
-                  return True
-              # 3.x 布局：5 个 SYMBOL 连续定义，4.17 前 arm64 符号名没有 __arm64_ 前缀
-              old3 = (
-                  '#define PRCTL_SYMBOL "__arm64_sys_prctl"\n'
-                  '#define SYS_READ_SYMBOL "__arm64_sys_read"\n'
-                  '#define SYS_NEWFSTATAT_SYMBOL "__arm64_sys_newfstatat"\n'
-                  '#define SYS_FACCESSAT_SYMBOL "__arm64_sys_faccessat"\n'
-                  '#define SYS_EXECVE_SYMBOL "__arm64_sys_execve"\n'
-              )
-              if old3 in txt:
-                  new3 = (
-                      '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)\n'
-                      + old3 +
-                      '#else\n'
-                      '#define PRCTL_SYMBOL "sys_prctl"\n'
-                      '#define SYS_READ_SYMBOL "sys_read"\n'
-                      '#define SYS_NEWFSTATAT_SYMBOL "sys_newfstatat"\n'
-                      '#define SYS_FACCESSAT_SYMBOL "sys_faccessat"\n'
-                      '#define SYS_EXECVE_SYMBOL "sys_execve"\n'
-                      '#endif\n'
-                  )
-                  path.write_text(txt.replace(old3, new3, 1))
                   return True
               old = (
                   '#define REBOOT_SYMBOL "__arm64_sys_reboot"\n'
@@ -1318,7 +1276,6 @@ jobs:
               sepolicy_c = base / "selinux/sepolicy.c"
               if not arch_h.exists() and not kp_hook.exists() and not kp_util.exists() and not ksu_main_c.exists() and not allowlist_c.exists() and not app_profile_c.exists() and not sucompat_c.exists() and not syscall_mgr_c.exists() and not pkg_observer_c.exists() and not setuid_hook_c.exists() and not kernel_umount_c.exists() and not supercalls_c.exists() and not su_mount_ns_c.exists() and not ksud_c.exists() and not file_wrapper_c.exists() and not util_c.exists() and not manual_su_c.exists() and not selinux_c.exists() and not rules_c.exists() and not sepolicy_c.exists():
                   continue
-              patch_module_import_ns(base)
               if mode == "builtin":
                   patch_arch_h(arch_h)
                   patch_kp_hook(kp_hook)
