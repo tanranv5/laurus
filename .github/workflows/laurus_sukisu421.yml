@@ -305,6 +305,17 @@ jobs:
 
           #endif /* < 5.8 */
 
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 16, 0)
+          #include <linux/poll.h>
+          #define __poll_t unsigned int
+          #define EPOLLIN POLLIN
+          #define EPOLLOUT POLLOUT
+          #define EPOLLERR POLLERR
+          #define EPOLLHUP POLLHUP
+          #define EPOLLRDNORM POLLRDNORM
+          #define EPOLLWRNORM POLLWRNORM
+          #endif
+
           #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 10, 0)
           #define __flush_icache_range(start, end) flush_icache_range(start, end)
           #endif
