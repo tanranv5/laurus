@@ -175,6 +175,22 @@ jobs:
                      "#endif")
               p.write_text(s.replace(anchor, new, 1))
               print("patched core/init.c: MODULE_IMPORT_NS guarded")
+
+          subs = {
+              "linux/pgtable.h": "asm/pgtable.h",
+              "linux/minmax.h": "linux/kernel.h",
+              "linux/hex.h": "linux/kernel.h",
+              "linux/unaligned.h": "asm/unaligned.h",
+              "linux/ioctl.h": "linux/fs.h",
+          }
+          for f in d.rglob("*.[ch]"):
+              t = f.read_text()
+              o = t
+              for a, b in subs.items():
+                  t = t.replace("#include <%s>" % a, "#include <%s>" % b)
+              if t != o:
+                  f.write_text(t)
+                  print("patched header includes:", f)
           PYEOF
 
           if [ ! -f "${ksu_dir}/ksud.c" ]; then
