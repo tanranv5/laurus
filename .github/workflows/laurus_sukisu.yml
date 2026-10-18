@@ -14,7 +14,7 @@ name: build-laurus-sukisu
       sukisu_ref:
         description: "SukiSU Ultra 引用（分支/标签/commit）"
         required: true
-        default: "main"
+        default: "v4.1.2"
       sukisu_mode:
         description: "SukiSU 集成模式：builtin 更适合非 GKI/老内核"
         required: true
@@ -127,11 +127,11 @@ jobs:
             exit 0
           fi
 
-          ref="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_ref || 'main' }}"
+          ref="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_ref || 'v4.1.2' }}"
           mode="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_mode || 'builtin' }}"
 
           # SukiSU 官方脚本
-          curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${ref}/kernel/setup.sh" | bash -s "$mode"
+          curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${ref}/kernel/setup.sh" | bash -s "$ref"
 
           # 应用 manual hook 补丁（4.14）
           patch_url="https://raw.githubusercontent.com/rksuorg/kernel_patches/master/manual_hook/kernel-4.14.patch"
