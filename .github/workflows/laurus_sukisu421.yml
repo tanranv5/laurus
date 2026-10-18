@@ -211,6 +211,24 @@ jobs:
                   s = s.replace(anchor, stub, 1) + "\n#endif /* KSU_LSM_HOOK_STUB */\n"
                   p.write_text(s)
                   print("patched hook/lsm_hook.c: stub for < 5.7")
+
+          # 4.14 的 file_operations 没有 iopoll/remap_file_range/fadvise/mmap_supported_flags
+          p = d / "infra/file_wrapper.c"
+          s = p.read_text()
+          if "KSU_FILE_WRAPPER_STUB" not in s:
+              head = '''#include <linux/version.h>
+
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0) /* KSU_FILE_WRAPPER_STUB */
+          #include <linux/fs.h>
+          #include <linux/file.h>
+
+          int ksu_install_file_wrapper(int fd) { return -ENOSYS; }
+          void ksu_file_wrapper_init(void) { }
+
+          #else
+          '''
+              p.write_text(head + s + "\n#endif /* KSU_FILE_WRAPPER_STUB */\n")
+              print("patched infra/file_wrapper.c: stub for < 5.7")
           PYEOF
 
           # 4.14 缺 nofault 系列（5.8+ 才有），补一个强制包含的兼容头
