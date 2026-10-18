@@ -144,6 +144,39 @@ jobs:
             ksu_dir="drivers/kernelsu"
           fi
 
+          # v4.2.1 代码面向 5.x，4.14 缺 syscall_fn_t / MODULE_IMPORT_NS，打兼容 shim
+          python3 - "${ksu_dir}" <<'PYEOF'
+          import sys
+          from pathlib import Path
+
+          d = Path(sys.argv[1])
+
+          p = d / "hook/syscall_hook.h"
+          s = p.read_text()
+          if "__aarch64__" not in s:
+              anchor = "#elif defined(__riscv)\n"
+              new = ("#elif defined(__aarch64__)\n"
+                     "typedef asmlinkage long (*syscall_fn_t)(const struct pt_regs *);\n"
+                     "#elif defined(__riscv)\n")
+              if anchor in s:
+                  p.write_text(s.replace(anchor, new, 1))
+                  print("patched hook/syscall_hook.h: syscall_fn_t for arm64")
+              else:
+                  print("WARNING: syscall_hook.h anchor not found")
+
+          p = d / "core/init.c"
+          s = p.read_text()
+          anchor = ("#else\n"
+                    "MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);\n"
+                    "#endif")
+          if "KERNEL_VERSION(5, 4, 0)" not in s and anchor in s:
+              new = ("#elif LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)\n"
+                     "MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);\n"
+                     "#endif")
+              p.write_text(s.replace(anchor, new, 1))
+              print("patched core/init.c: MODULE_IMPORT_NS guarded")
+          PYEOF
+
           if [ ! -f "${ksu_dir}/ksud.c" ]; then
             echo "v4.2.1 layout (no ksud.c) -> skip legacy patches"
             exit 0
