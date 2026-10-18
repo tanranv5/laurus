@@ -182,6 +182,7 @@ jobs:
               "linux/hex.h": "linux/kernel.h",
               "linux/unaligned.h": "asm/unaligned.h",
               "linux/ioctl.h": "linux/fs.h",
+              "uapi/linux/mount.h": "linux/mount.h",
           }
           for f in d.rglob("*.[ch]"):
               t = f.read_text()
