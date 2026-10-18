@@ -1,0 +1,1273 @@
+name: build-laurus-sukisu-421
+
+"on":
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "要编译的内核分支"
+        required: true
+        default: "laurus-q-oss-ci"
+      defconfig:
+        description: "defconfig（相对 arch/arm64/configs/）"
+        required: true
+        default: "vendor/laurus-perf_defconfig"
+      sukisu_ref:
+        description: "SukiSU Ultra 引用（分支/标签/commit）"
+        required: true
+        default: "v4.2.1"
+      sukisu_mode:
+        description: "SukiSU 集成模式：builtin 更适合非 GKI/老内核"
+        required: true
+        default: "builtin"
+        type: choice
+        options:
+          - builtin
+          - main
+      fortify:
+        description: "是否启用 FORTIFY_SOURCE（推荐日用 on；老 GCC 4.9 需先修触发点再开启）"
+        required: true
+        default: "off"
+        type: choice
+        options:
+          - "off"
+          - "on"
+      build_dtbo:
+        description: "是否构建 DTBO（overlay）；off 会绕过 trinket dtbo 编译失败（先确保内核能出镜像）"
+        required: true
+        default: "off"
+        type: choice
+        options:
+          - "off"
+          - "on"
+      kpm:
+        description: "是否启用 KPM（KernelPatch Module）：用 kptools 向 boot.img 注入 kpimg"
+        required: true
+        default: "off"
+        type: choice
+        options:
+          - "off"
+          - "on"
+      superkey:
+        description: "KPM superkey（kpm=on 时必填，用于 kptools -s）"
+        required: false
+        default: ""
+      gcc64_repo:
+        description: "AArch64 GCC 4.9 工具链仓库"
+        required: true
+        default: "LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9"
+      gcc64_ref:
+        description: "AArch64 GCC 4.9 工具链分支"
+        required: true
+        default: "lineage-19.1"
+      gcc32_repo:
+        description: "ARM GCC 4.9 工具链仓库"
+        required: true
+        default: "LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9"
+      gcc32_ref:
+        description: "ARM GCC 4.9 工具链分支"
+        required: true
+        default: "lineage-19.1"
+  push:
+    branches:
+      - laurus-q-oss-ci
+    paths:
+      - ".github/workflows/laurus_sukisu.yml"
+      - "ci_trigger.txt"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      WITH_SUKISU: "on"
+
+    steps:
+      - name: 检出内核源码
+        id: checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.kernel_branch || 'laurus-q-oss-ci' }}
+
+      - name: 安装依赖
+        id: deps
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates \
+            curl flex git libelf-dev libssl-dev \
+            python3 rsync unzip xz-utils \
+            device-tree-compiler zip
+
+      - name: 拉取工具链（GCC 4.9）
+        id: toolchain
+        run: |
+          set -euxo pipefail
+          GCC64_REPO="${{ github.event_name == 'workflow_dispatch' && inputs.gcc64_repo || 'LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9' }}"
+          GCC64_REF="${{ github.event_name == 'workflow_dispatch' && inputs.gcc64_ref || 'lineage-19.1' }}"
+          GCC32_REPO="${{ github.event_name == 'workflow_dispatch' && inputs.gcc32_repo || 'LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9' }}"
+          GCC32_REF="${{ github.event_name == 'workflow_dispatch' && inputs.gcc32_ref || 'lineage-19.1' }}"
+
+          git clone --depth=1 -b "$GCC64_REF" "https://github.com/${GCC64_REPO}.git" toolchain-gcc64
+          git clone --depth=1 -b "$GCC32_REF" "https://github.com/${GCC32_REPO}.git" toolchain-gcc32
+
+          echo "TOOLCHAIN_GCC64=$PWD/toolchain-gcc64" >> "$GITHUB_ENV"
+          echo "TOOLCHAIN_GCC32=$PWD/toolchain-gcc32" >> "$GITHUB_ENV"
+
+      - name: 集成 SukiSU Ultra
+        id: sukisu
+        run: |
+          set -euxo pipefail
+          if [ "${WITH_SUKISU}" != "on" ]; then
+            echo "WITH_SUKISU=${WITH_SUKISU}, skip SukiSU integrate."
+            exit 0
+          fi
+
+          ref="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_ref || 'main' }}"
+          mode="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_mode || 'builtin' }}"
+
+          # SukiSU 官方脚本
+          curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${ref}/kernel/setup.sh" | bash -s "$mode"
+
+          # 应用 manual hook 补丁（4.14）
+          patch_url="https://raw.githubusercontent.com/rksuorg/kernel_patches/master/manual_hook/kernel-4.14.patch"
+          curl -fsSL "$patch_url" -o /tmp/ksu_manual_hook.patch
+          if git apply --reverse --check /tmp/ksu_manual_hook.patch; then
+            echo "manual hook patch already applied"
+          else
+            git apply /tmp/ksu_manual_hook.patch
+          fi
+
+          # 补齐 manual hook 适配符号，避免链接错误
+          if [ -d "common/drivers" ]; then
+            ksu_dir="common/drivers/kernelsu"
+          else
+            ksu_dir="drivers/kernelsu"
+          fi
+
+          if [ ! -f "${ksu_dir}/ksud.c" ]; then
+            echo "v4.2.1 layout (no ksud.c) -> skip legacy patches"
+            exit 0
+          fi
+
+          # 修补 builtin sucompat：为 faccessat/stat 添加 allowlist 检查
+          # builtin 模式的 ksu_handle_faccessat/ksu_handle_stat 对所有进程
+          # 重定向 su→sh，使 su 对检测 App 可见。在 4.14 上 SUS_PATH 不可用，
+          # 因此直接在 VFS hook 层过滤：仅对 root 授权 UID 做重定向。
+          python3 - "${ksu_dir}" <<'PYEOF'
+          import sys, glob
+          from pathlib import Path
+          ksu_dir = sys.argv[1]
+          candidates = list(Path(ksu_dir).rglob("sucompat.c"))
+          if not candidates:
+              print("WARNING: sucompat.c not found, skip faccessat/stat patch")
+              sys.exit(0)
+          p = candidates[0]
+          src = p.read_text()
+          guard = "ksu_is_allow_uid_for_current"
+          if guard in src and "ksu_handle_faccessat" in src:
+              # 检查 faccessat 函数体内是否已有 guard
+              fa_idx = src.index("ksu_handle_faccessat")
+              fa_body = src[fa_idx:fa_idx+500]
+              if guard in fa_body:
+                  print(f"sucompat faccessat already patched in {p}")
+                  sys.exit(0)
+          # Patch ksu_handle_faccessat
+          old_fa = ('int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n'
+                    '\t\t\t int *__unused_flags)\n'
+                    '{\n'
+                    '\tchar path')
+          new_fa = ('int ksu_handle_faccessat(int *dfd, const char __user **filename_user, int *mode,\n'
+                    '\t\t\t int *__unused_flags)\n'
+                    '{\n'
+                    '\tif (!ksu_is_allow_uid_for_current(current_uid().val))\n'
+                    '\t\treturn 0;\n'
+                    '\tchar path')
+          if old_fa in src:
+              src = src.replace(old_fa, new_fa, 1)
+              print(f"Patched ksu_handle_faccessat in {p}")
+          else:
+              print(f"WARNING: faccessat pattern not found in {p}")
+          # Patch ksu_handle_stat (< 6.1 version)
+          old_st = ('int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags)\n'
+                    '{\n'
+                    '\tchar path')
+          new_st = ('int ksu_handle_stat(int *dfd, const char __user **filename_user, int *flags)\n'
+                    '{\n'
+                    '\tif (!ksu_is_allow_uid_for_current(current_uid().val))\n'
+                    '\t\treturn 0;\n'
+                    '\tchar path')
+          if old_st in src:
+              src = src.replace(old_st, new_st, 1)
+              print(f"Patched ksu_handle_stat in {p}")
+          else:
+              print(f"WARNING: stat pattern not found in {p}")
+          p.write_text(src)
+          PYEOF
+
+          # 修补 ksud.c：SAR 设备 /init.rc 路径 + vfs_read hook 实现
+          python3 - "${ksu_dir}" <<'PYEOF'
+          import sys
+          from pathlib import Path
+          ksu_dir = sys.argv[1]
+          p = Path(ksu_dir) / "ksud.c"
+          src = p.read_text()
+
+          # 1) is_init_rc: 支持 /init.rc (SAR 设备)
+          old = 'if (strcmp(dpath, "/system/etc/init/hw/init.rc")) {'
+          new = 'if (strcmp(dpath, "/system/etc/init/hw/init.rc") && strcmp(dpath, "/init.rc")) {'
+          if old in src:
+              src = src.replace(old, new, 1)
+
+          # 2) stop_init_rc_hook: 同时关闭 ksu_vfs_read_hook
+          old_stop = 'ksu_init_rc_hook = false;\n\tpr_info("stop vfs_read_hook\\n");'
+          new_stop = ('ksu_init_rc_hook = false;\n'
+                      '\textern bool ksu_vfs_read_hook;\n'
+                      '\tksu_vfs_read_hook = false;\n'
+                      '\tpr_info("stop vfs_read_hook\\n");')
+          if 'ksu_vfs_read_hook' not in src:
+              src = src.replace(old_stop, new_stop, 1)
+
+          # 3) 在 ksu_handle_sys_read 函数结束后插入 ksu_handle_vfs_read
+          vfs_read_impl = '''
+          /* --- manual_hook: vfs_read hook for init.rc injection --- */
+          bool ksu_vfs_read_hook __read_mostly = true;
+
+          int ksu_handle_vfs_read(struct file **file_ptr, char __user **buf_ptr,
+                                  size_t *count_ptr, loff_t **pos)
+          {
+          \tstruct file *file;
+          \tif (!file_ptr || !(file = *file_ptr))
+          \t\treturn 0;
+          \tif (!is_init_rc(file))
+          \t\treturn 0;
+          \tstatic bool vfs_rc_hooked = false;
+          \tif (vfs_rc_hooked) {
+          \t\tksu_vfs_read_hook = false;
+          \t\treturn 0;
+          \t}
+          \tvfs_rc_hooked = true;
+          \tpr_info("read init.rc (vfs_read hook), comm: %s, rc_count: %zu\\n",
+          \t\tcurrent->comm, ksu_rc_len);
+          \tmemcpy(&fops_proxy, file->f_op, sizeof(struct file_operations));
+          \torig_read = file->f_op->read;
+          \tif (orig_read)
+          \t\tfops_proxy.read = read_proxy;
+          \torig_read_iter = file->f_op->read_iter;
+          \tif (orig_read_iter)
+          \t\tfops_proxy.read_iter = read_iter_proxy;
+          \tfile->f_op = &fops_proxy;
+          \treturn 0;
+          }
+          '''
+
+          # 找到 ksu_handle_sys_read 函数结尾的 fput + #endif + }
+          marker = 'fput(file);\n#endif\n}'
+          if marker in src and 'ksu_handle_vfs_read' not in src:
+              idx = src.index(marker) + len(marker)
+              src = src[:idx] + '\n' + vfs_read_impl + src[idx:]
+
+          p.write_text(src)
+          print("ksud.c patched: init.rc path + vfs_read hook")
+          PYEOF
+
+          # 修补 SELinux rules：允许 init 执行 /data/adb/ksud (标签 adb_data_file)
+          python3 - "${ksu_dir}" <<'PYEOF'
+          import sys
+          from pathlib import Path
+          ksu_dir = sys.argv[1]
+          p = Path(ksu_dir) / "selinux" / "rules.c"
+          src = p.read_text()
+          marker = 'ksu_allow(db, "init", KERNEL_SU_DOMAIN, ALL, ALL);'
+          extra = ('\n'
+                   '\tksu_allow(db, "init", "adb_data_file", "file", ALL);\n'
+                   '\tksu_allow(db, "init", "adb_data_file", "dir", ALL);')
+          changed = False
+          if '"init", "adb_data_file"' not in src and marker in src:
+              src = src.replace(marker, marker + extra, 1)
+              changed = True
+              print("rules.c: added init adb_data_file rule")
+          # ensure apply_kernelsu_rules flushes AVC cache
+          import re
+          m = re.search(r'void apply_kernelsu_rules\([^)]*\)', src)
+          if m is None:
+              print("WARNING: apply_kernelsu_rules not found, skip AVC fix")
+          else:
+              fn_sig = m.group(0)
+              idx = m.start()
+              if 'reset_avc_cache' not in src[:idx]:
+                  src = src[:idx] + 'static void reset_avc_cache(void);\n\n' + src[idx:]
+                  changed = True
+                  print("rules.c: added forward declaration for reset_avc_cache")
+              unlock_marker = 'mutex_unlock(&ksu_rules);\n}'
+              avc_call = 'reset_avc_cache();\n\tmutex_unlock(&ksu_rules);\n}'
+              parts = src.split(fn_sig)
+              if len(parts) > 1 and 'reset_avc_cache()' not in parts[1].split('mutex_unlock')[0]:
+                  src = src.replace(unlock_marker, avc_call, 1)
+                  changed = True
+                  print("rules.c: added reset_avc_cache to apply_kernelsu_rules")
+          if changed:
+              p.write_text(src)
+          else:
+              print("rules.c: no changes needed")
+          PYEOF
+
+          cat > "${ksu_dir}/manual_hook_adapters.c" <<'EOF'
+          #include <linux/compiler.h>
+          #include <linux/cred.h>
+          #include <linux/err.h>
+          #include <linux/fs.h>
+          #include <linux/namei.h>
+          #include <linux/printk.h>
+          #include <linux/string.h>
+          #include <linux/version.h>
+
+          #include "allowlist.h"
+          #include "app_profile.h"
+          #include "ksud.h"
+
+          struct user_arg_ptr;
+          int ksu_handle_execveat_ksud(int *fd, struct filename **filename_ptr,
+                                       struct user_arg_ptr *argv,
+                                       struct user_arg_ptr *envp, int *flags);
+
+          // 弱符号兜底，避免与 SukiSU 自带实现重复定义
+          bool ksu_execveat_hook __read_mostly __weak = true;
+          bool ksu_input_hook __read_mostly __weak = true;
+
+          int __weak ksu_handle_execveat(int *fd, struct filename **filename_ptr,
+                                         void *argv, void *envp, int *flags)
+          {
+              struct user_arg_ptr *argv_ptr = (struct user_arg_ptr *)argv;
+              struct user_arg_ptr *envp_ptr = (struct user_arg_ptr *)envp;
+
+              ksu_handle_execveat_ksud(fd, filename_ptr, argv_ptr, envp_ptr, flags);
+
+              if (!ksu_is_allow_uid_for_current(current_uid().val)) {
+                  return 0;
+              }
+              if (!filename_ptr || !*filename_ptr || IS_ERR(*filename_ptr)) {
+                  return 0;
+              }
+
+              if (!strcmp((*filename_ptr)->name, "/system/bin/su")) {
+                  struct filename *newf = getname_kernel(KSUD_PATH);
+                  if (!IS_ERR(newf)) {
+                      putname(*filename_ptr);
+                      *filename_ptr = newf;
+                      escape_with_root_profile();
+                  }
+              }
+
+              return 0;
+          }
+
+          int __weak ksu_handle_execveat_sucompat(int *fd, struct filename **filename_ptr,
+                                                  void *argv, void *envp, int *flags)
+          {
+              return 0;
+          }
+
+          EOF
+
+          if ! grep -q "manual_hook_adapters.o" "${ksu_dir}/Kbuild"; then
+            echo "kernelsu-objs += manual_hook_adapters.o" >> "${ksu_dir}/Kbuild"
+          fi
+
+      - name: SUSFS 集成 + 内核补丁
+        id: susfs
+        if: false
+        run: |
+          set -euxo pipefail
+          if [ -d "common/drivers" ]; then
+            ksu_dir="common/drivers/kernelsu"
+          else
+            ksu_dir="drivers/kernelsu"
+          fi
+
+          # ---- SUSFS v2.0.0 集成 (4.14 最小实现) ----
+          # 策略：使用 v2.0.0 头文件（匹配 SukiSU builtin supercalls.c API），
+          # 自写最小 susfs.c 实现 SPOOF_UNAME / SUS_KSTAT / ENABLE_LOG / SPOOF_CMDLINE 等。
+          # 不应用 v1.5.5 内核补丁（其 API 签名与 v2.0.0 不兼容）。
+          echo "--- Integrating SUSFS v2.0.0 (minimal, kernel 4.14) ---"
+
+          git clone --depth=1 -b gki-android14-6.1 https://gitlab.com/simonpunk/susfs4ksu.git /tmp/susfs4ksu
+
+          # 复制 v2.0.0 头文件
+          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs.h include/linux/susfs.h
+          cp /tmp/susfs4ksu/kernel_patches/include/linux/susfs_def.h include/linux/susfs_def.h
+
+          # 4.14 没有 linux/bits.h（4.19 引入），BIT() 在 bitops.h
+          sed -i 's|#include <linux/bits.h>|#include <linux/bitops.h>|' include/linux/susfs_def.h
+          # susfs_def.h 内联函数访问 current->thread_info，需要 sched.h
+          sed -i '/#include <linux\/bitops.h>/a #include <linux\/sched.h>' include/linux/susfs_def.h
+
+          # 写入最小 susfs.c（v2.0.0 API，4.14 兼容）
+          cat > fs/susfs.c <<'SUSFS_C'
+          #include <linux/kernel.h>
+          #include <linux/module.h>
+          #include <linux/slab.h>
+          #include <linux/string.h>
+          #include <linux/uaccess.h>
+          #include <linux/utsname.h>
+          #include <linux/seq_file.h>
+          #include <linux/version.h>
+          #include <linux/susfs.h>
+          #include <linux/susfs_def.h>
+
+          #if defined(CONFIG_ARM64) && defined(TIF_PROC_UMOUNTED)
+          #if (TIF_PROC_UMOUNTED >= BITS_PER_LONG)
+          #error "susfs: TIF_PROC_UMOUNTED exceeds thread_info.flags bit width"
+          #endif
+          #endif
+
+          static inline bool susfs_user_ptr_ok(void __user **p)
+          {
+          	return p && *p;
+          }
+
+          static bool susfs_log_enabled = false;
+
+          #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+          static DEFINE_MUTEX(susfs_uname_mutex);
+          static struct st_susfs_uname spoofed_uname;
+          static bool uname_spoofed = false;
+
+          void susfs_set_uname(void __user **user_info)
+          {
+          	struct st_susfs_uname tmp;
+          	if (!susfs_user_ptr_ok(user_info))
+          		return;
+          	if (copy_from_user(&tmp, *user_info, sizeof(tmp))) {
+          		if (susfs_log_enabled)
+          			pr_err("susfs: set_uname copy_from_user failed\n");
+          		return;
+          	}
+          	tmp.release[__NEW_UTS_LEN] = '\0';
+          	tmp.version[__NEW_UTS_LEN] = '\0';
+          	mutex_lock(&susfs_uname_mutex);
+          	memcpy(&spoofed_uname, &tmp, sizeof(spoofed_uname));
+          	uname_spoofed = true;
+          	mutex_unlock(&susfs_uname_mutex);
+          	if (susfs_log_enabled)
+          		pr_info("susfs: uname spoofed: release='%s'\n", spoofed_uname.release);
+          }
+
+          void susfs_spoof_uname(struct new_utsname *tmp)
+          {
+          	if (!uname_spoofed)
+          		return;
+          	mutex_lock(&susfs_uname_mutex);
+          	if (spoofed_uname.release[0])
+          		strncpy(tmp->release, spoofed_uname.release, __NEW_UTS_LEN);
+          	if (spoofed_uname.version[0])
+          		strncpy(tmp->version, spoofed_uname.version, __NEW_UTS_LEN);
+          	tmp->release[__NEW_UTS_LEN] = '\0';
+          	tmp->version[__NEW_UTS_LEN] = '\0';
+          	mutex_unlock(&susfs_uname_mutex);
+          }
+          #endif
+
+          #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+          #include <linux/hashtable.h>
+          #include <linux/slab.h>
+          static DEFINE_HASHTABLE(susfs_kstat_ht, 8);
+          static DEFINE_SPINLOCK(susfs_kstat_lock);
+
+          void susfs_add_sus_kstat(void __user **user_info)
+          {
+          	struct st_susfs_sus_kstat info;
+          	struct st_susfs_sus_kstat_hlist *entry, *existing;
+          	if (!susfs_user_ptr_ok(user_info))
+          		return;
+          	if (copy_from_user(&info, *user_info, sizeof(info)))
+          		return;
+          	spin_lock(&susfs_kstat_lock);
+          	hash_for_each_possible(susfs_kstat_ht, existing, node, info.target_ino) {
+          		if (existing->target_ino == info.target_ino) {
+          			memcpy(&existing->info, &info, sizeof(info));
+          			spin_unlock(&susfs_kstat_lock);
+          			return;
+          		}
+          	}
+          	spin_unlock(&susfs_kstat_lock);
+          	entry = kzalloc(sizeof(*entry), GFP_KERNEL);
+          	if (!entry) return;
+          	entry->target_ino = info.target_ino;
+          	memcpy(&entry->info, &info, sizeof(info));
+          	spin_lock(&susfs_kstat_lock);
+          	hash_add(susfs_kstat_ht, &entry->node, entry->target_ino);
+          	spin_unlock(&susfs_kstat_lock);
+          	if (susfs_log_enabled)
+          		pr_info("susfs: add_sus_kstat ino=%lu\n", info.target_ino);
+          }
+
+          void susfs_update_sus_kstat(void __user **user_info)
+          {
+          	susfs_add_sus_kstat(user_info);
+          }
+
+          void susfs_sus_ino_for_generic_fillattr(unsigned long ino, struct kstat *stat)
+          {
+          	struct st_susfs_sus_kstat_hlist *entry;
+          	spin_lock(&susfs_kstat_lock);
+          	hash_for_each_possible(susfs_kstat_ht, entry, node, ino) {
+          		if (entry->target_ino == ino) {
+          			const struct st_susfs_sus_kstat *s = &entry->info;
+          			if (s->spoofed_ino) stat->ino = s->spoofed_ino;
+          			if (s->spoofed_dev) stat->dev = s->spoofed_dev;
+          			if (s->spoofed_nlink) stat->nlink = s->spoofed_nlink;
+          			if (s->spoofed_size) stat->size = s->spoofed_size;
+          			if (s->spoofed_atime_tv_sec) stat->atime.tv_sec = s->spoofed_atime_tv_sec;
+          			if (s->spoofed_mtime_tv_sec) stat->mtime.tv_sec = s->spoofed_mtime_tv_sec;
+          			if (s->spoofed_ctime_tv_sec) stat->ctime.tv_sec = s->spoofed_ctime_tv_sec;
+          			if (s->spoofed_atime_tv_nsec) stat->atime.tv_nsec = s->spoofed_atime_tv_nsec;
+          			if (s->spoofed_mtime_tv_nsec) stat->mtime.tv_nsec = s->spoofed_mtime_tv_nsec;
+          			if (s->spoofed_ctime_tv_nsec) stat->ctime.tv_nsec = s->spoofed_ctime_tv_nsec;
+          			if (s->spoofed_blksize) stat->blksize = s->spoofed_blksize;
+          			if (s->spoofed_blocks) stat->blocks = s->spoofed_blocks;
+          			break;
+          		}
+          	}
+          	spin_unlock(&susfs_kstat_lock);
+          }
+
+          void susfs_sus_ino_for_show_map_vma(unsigned long ino, dev_t *out_dev, unsigned long *out_ino)
+          {
+          	struct st_susfs_sus_kstat_hlist *entry;
+          	spin_lock(&susfs_kstat_lock);
+          	hash_for_each_possible(susfs_kstat_ht, entry, node, ino) {
+          		if (entry->target_ino == ino) {
+          			if (entry->info.spoofed_dev) *out_dev = entry->info.spoofed_dev;
+          			if (entry->info.spoofed_ino) *out_ino = entry->info.spoofed_ino;
+          			break;
+          		}
+          	}
+          	spin_unlock(&susfs_kstat_lock);
+          }
+          #endif
+
+          #ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+          void susfs_enable_log(void __user **user_info)
+          {
+          	struct st_susfs_log tmp;
+          	if (!susfs_user_ptr_ok(user_info))
+          		return;
+          	if (copy_from_user(&tmp, *user_info, sizeof(tmp)))
+          		return;
+          	susfs_log_enabled = tmp.enabled;
+          	pr_info("susfs: log %s\n", susfs_log_enabled ? "enabled" : "disabled");
+          }
+          #endif
+
+          #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          static DEFINE_MUTEX(susfs_cmdline_mutex);
+          static char *fake_cmdline = NULL;
+
+          void susfs_set_cmdline_or_bootconfig(void __user **user_info)
+          {
+          	struct st_susfs_spoof_cmdline_or_bootconfig *tmp;
+          	char *new_cmdline, *old_cmdline;
+          	if (!susfs_user_ptr_ok(user_info))
+          		return;
+          	tmp = kmalloc(sizeof(*tmp), GFP_KERNEL);
+          	if (!tmp) return;
+          	if (copy_from_user(tmp, *user_info, sizeof(*tmp))) {
+          		kfree(tmp);
+          		return;
+          	}
+          	tmp->fake_cmdline_or_bootconfig[SUSFS_FAKE_CMDLINE_OR_BOOTCONFIG_SIZE - 1] = '\0';
+          	new_cmdline = kstrdup(tmp->fake_cmdline_or_bootconfig, GFP_KERNEL);
+          	kfree(tmp);
+          	if (!new_cmdline)
+          		return;
+          	mutex_lock(&susfs_cmdline_mutex);
+          	old_cmdline = fake_cmdline;
+          	fake_cmdline = new_cmdline;
+          	mutex_unlock(&susfs_cmdline_mutex);
+          	kfree(old_cmdline);
+          	if (susfs_log_enabled)
+          		pr_info("susfs: cmdline spoofed\n");
+          }
+
+          int susfs_spoof_cmdline_or_bootconfig(struct seq_file *m)
+          {
+          	int ret = 0;
+          	mutex_lock(&susfs_cmdline_mutex);
+          	if (fake_cmdline) {
+          		seq_puts(m, fake_cmdline);
+          		seq_putc(m, '\n');
+          		ret = 1;
+          	}
+          	mutex_unlock(&susfs_cmdline_mutex);
+          	return ret;
+          }
+          #endif
+
+          /* 无条件编译的 supercalls 接口 */
+          void susfs_set_avc_log_spoofing(void __user **user_info)
+          {
+          	struct st_susfs_avc_log_spoofing tmp;
+          	if (!susfs_user_ptr_ok(user_info))
+          		return;
+          	if (!copy_from_user(&tmp, *user_info, sizeof(tmp)) && susfs_log_enabled)
+          		pr_info("susfs: avc_log_spoofing=%d\n", tmp.enabled);
+          }
+
+          void susfs_get_enabled_features(void __user **user_info)
+          {
+          	struct st_susfs_enabled_features *feat;
+          	if (!susfs_user_ptr_ok(user_info))
+          		return;
+          	feat = kzalloc(sizeof(*feat), GFP_KERNEL);
+          	if (!feat) return;
+          	snprintf(feat->enabled_features, sizeof(feat->enabled_features),
+          #ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME
+          		"SPOOF_UNAME,"
+          #endif
+          #ifdef CONFIG_KSU_SUSFS_SUS_KSTAT
+          		"SUS_KSTAT,"
+          #endif
+          #ifdef CONFIG_KSU_SUSFS_ENABLE_LOG
+          		"ENABLE_LOG,"
+          #endif
+          #ifdef CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS
+          		"HIDE_KSU_SUSFS_SYMBOLS,"
+          #endif
+          #ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG
+          		"SPOOF_CMDLINE_OR_BOOTCONFIG,"
+          #endif
+          		"");
+          	if (copy_to_user(*user_info, feat, sizeof(*feat)))
+          		pr_err("susfs: get_enabled_features copy_to_user failed\n");
+          	kfree(feat);
+          }
+
+          void susfs_show_variant(void __user **user_info)
+          {
+          	struct st_susfs_variant v;
+          	if (!susfs_user_ptr_ok(user_info))
+          		return;
+          	memset(&v, 0, sizeof(v));
+          	strncpy(v.susfs_variant, SUSFS_VARIANT, sizeof(v.susfs_variant) - 1);
+          	if (copy_to_user(*user_info, &v, sizeof(v)))
+          		pr_err("susfs: show_variant copy_to_user failed\n");
+          }
+
+          void susfs_show_version(void __user **user_info)
+          {
+          	struct st_susfs_version v;
+          	if (!susfs_user_ptr_ok(user_info))
+          		return;
+          	memset(&v, 0, sizeof(v));
+          	strncpy(v.susfs_version, SUSFS_VERSION, sizeof(v.susfs_version) - 1);
+          	if (copy_to_user(*user_info, &v, sizeof(v)))
+          		pr_err("susfs: show_version copy_to_user failed\n");
+          }
+
+          void susfs_start_sdcard_monitor_fn(void) { }
+
+          void __init susfs_init(void)
+          {
+          	pr_info("susfs: " SUSFS_VERSION " (" SUSFS_VARIANT ") initialized\n");
+          }
+          SUSFS_C
+
+          # fs/Makefile 添加 susfs.o
+          if ! grep -q "susfs.o" fs/Makefile; then
+            echo 'obj-$(CONFIG_KSU_SUSFS) += susfs.o' >> fs/Makefile
+          fi
+
+          # SUS_PATH/SUS_MOUNT/SUS_MAP/OPEN_REDIRECT 的 stub（仅在功能启用但无真实实现时提供空实现）
+          cat > "${ksu_dir}/susfs_compat_stubs.c" <<'STUBS'
+          #include <linux/errno.h>
+          #include <linux/susfs_def.h>
+
+          #ifdef CONFIG_KSU_SUSFS_SUS_PATH
+          void susfs_add_sus_path(void __user **a) { }
+          void susfs_add_sus_path_loop(void __user **a) { }
+          void susfs_set_i_state_on_external_dir(void __user **a) { }
+          void susfs_reorder_mnt_id(void *a, void *b) { }
+          void susfs_run_sus_path_loop(void *a) { }
+          #endif
+          #ifdef CONFIG_KSU_SUSFS_SUS_MOUNT
+          void susfs_set_hide_sus_mnts_for_non_su_procs(void __user **a) { }
+          #endif
+          #ifdef CONFIG_KSU_SUSFS_OPEN_REDIRECT
+          void susfs_add_open_redirect(void __user **a) { }
+          #endif
+          #ifdef CONFIG_KSU_SUSFS_SUS_MAP
+          void susfs_add_sus_map(void __user **a) { }
+          #endif
+          STUBS
+
+          if ! grep -q "susfs_compat_stubs.o" "${ksu_dir}/Kbuild"; then
+            echo "kernelsu-objs += susfs_compat_stubs.o" >> "${ksu_dir}/Kbuild"
+          fi
+
+          # 验证
+          test -f fs/susfs.c
+          test -f include/linux/susfs.h
+          test -f include/linux/susfs_def.h
+          grep -q "susfs.o" fs/Makefile
+
+          # ---- 内核 hook 补丁（精确插桩，不用 fuzz 补丁） ----
+          # 1) SPOOF_UNAME: hook newuname syscall
+          python3 <<'PATCH_UNAME'
+          from pathlib import Path
+          p = Path("kernel/sys.c")
+          src = p.read_text()
+          marker = 'memcpy(&tmp, utsname(), sizeof(tmp));'
+          hook = ('#ifdef CONFIG_KSU_SUSFS_SPOOF_UNAME\n'
+                  '\t{\n'
+                  '\t\textern void susfs_spoof_uname(struct new_utsname *);\n'
+                  '\t\tsusfs_spoof_uname(&tmp);\n'
+                  '\t}\n'
+                  '#endif\n')
+          if marker in src and 'susfs_spoof_uname' not in src:
+              src = src.replace(marker, marker + '\n' + hook, 1)
+              p.write_text(src)
+              print("kernel/sys.c: SPOOF_UNAME hook added")
+          else:
+              print("kernel/sys.c: already patched or anchor not found")
+          PATCH_UNAME
+
+          # 2) SPOOF_CMDLINE: hook /proc/cmdline
+          python3 <<'PATCH_CMDLINE'
+          from pathlib import Path
+          p = Path("fs/proc/cmdline.c")
+          src = p.read_text()
+          anchor = 'seq_puts(m, saved_command_line);'
+          if anchor not in src:
+              anchor = 'seq_printf(m, "%s\\n", saved_command_line);'
+          hook = ('#ifdef CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG\n'
+                  '\t{\n'
+                  '\t\textern int susfs_spoof_cmdline_or_bootconfig(struct seq_file *);\n'
+                  '\t\tif (susfs_spoof_cmdline_or_bootconfig(m))\n'
+                  '\t\t\treturn 0;\n'
+                  '\t}\n'
+                  '#endif\n')
+          if anchor in src and 'susfs_spoof_cmdline' not in src:
+              src = src.replace(anchor, hook + '\t' + anchor, 1)
+              p.write_text(src)
+              print("fs/proc/cmdline.c: SPOOF_CMDLINE hook added")
+          else:
+              print("fs/proc/cmdline.c: already patched or anchor not found")
+          PATCH_CMDLINE
+
+          # 3) SUS_KSTAT: hook generic_fillattr
+          python3 <<'PATCH_KSTAT'
+          from pathlib import Path
+          p = Path("fs/stat.c")
+          src = p.read_text()
+          anchor = 'stat->blocks = inode->i_blocks;'
+          hook = ('\n#ifdef CONFIG_KSU_SUSFS_SUS_KSTAT\n'
+                  '\t{\n'
+                  '\t\textern void susfs_sus_ino_for_generic_fillattr(unsigned long, struct kstat *);\n'
+                  '\t\tsusfs_sus_ino_for_generic_fillattr(inode->i_ino, stat);\n'
+                  '\t}\n'
+                  '#endif')
+          if anchor in src and 'susfs_sus_ino_for_generic_fillattr' not in src:
+              src = src.replace(anchor, anchor + hook, 1)
+              p.write_text(src)
+              print("fs/stat.c: SUS_KSTAT hook added")
+          else:
+              print("fs/stat.c: already patched or anchor not found")
+          PATCH_KSTAT
+
+          # 4) SYS_REBOOT: hook reboot syscall for ksu_driver fd installation
+          # kprobe fails on 4.14 (symbol mismatch), manual hook required
+          python3 <<'PATCH_REBOOT'
+          from pathlib import Path
+          p = Path("kernel/reboot.c")
+          src = p.read_text()
+          anchor = 'if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))'
+          hook = ('#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+                  '\t{\n'
+                  '\t\textern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);\n'
+                  '\t\tksu_handle_sys_reboot(magic1, magic2, cmd, (void __user **)&arg);\n'
+                  '\t}\n'
+                  '#endif\n')
+          if anchor in src and 'ksu_handle_sys_reboot' not in src:
+              src = src.replace(anchor, hook + '\t' + anchor, 1)
+              p.write_text(src)
+              print("kernel/reboot.c: SYS_REBOOT hook added for ksu_driver fd")
+          else:
+              print("kernel/reboot.c: already patched or anchor not found")
+          PATCH_REBOOT
+
+          # 5) SETRESUID: hook for manager fd installation + umount
+          # tracepoint on sys_enter doesn't fire for zygote children on 4.14
+          python3 <<'PATCH_SETRESUID'
+          from pathlib import Path
+          p = Path("kernel/sys.c")
+          src = p.read_text()
+          anchor = 'ksuid = make_kuid(ns, suid);'
+          hook = ('\n#ifdef CONFIG_KSU_MANUAL_HOOK\n'
+                  '\t{\n'
+                  '\t\textern int ksu_handle_setresuid(uid_t, uid_t, uid_t);\n'
+                  '\t\tksu_handle_setresuid(ruid, euid, suid);\n'
+                  '\t}\n'
+                  '#endif\n')
+          if anchor in src and 'ksu_handle_setresuid' not in src:
+              idx = src.index(anchor) + len(anchor)
+              src = src[:idx] + hook + src[idx:]
+              p.write_text(src)
+              print("kernel/sys.c: SETRESUID hook added for manager fd + umount")
+          else:
+              print("kernel/sys.c: already patched or anchor not found")
+          PATCH_SETRESUID
+
+          echo "SUSFS v2.0.0 minimal integration complete"
+
+      - name: 配置 defconfig
+        id: config
+        run: |
+          set -euxo pipefail
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$TOOLCHAIN_GCC64/bin:$TOOLCHAIN_GCC32/bin:$PATH"
+          export CROSS_COMPILE="$TOOLCHAIN_GCC64/bin/aarch64-linux-android-"
+          export CROSS_COMPILE_ARM32="$TOOLCHAIN_GCC32/bin/arm-linux-androideabi-"
+          export LOCALVERSION=
+
+          DEFCONFIG="${{ github.event_name == 'workflow_dispatch' && inputs.defconfig || 'vendor/laurus-perf_defconfig' }}"
+          DEFCONFIG_PATH="arch/arm64/configs/${DEFCONFIG}"
+
+          if [ ! -f "${DEFCONFIG_PATH}" ]; then
+            echo "defconfig 不存在：${DEFCONFIG_PATH}"
+            exit 1
+          fi
+
+          # 对齐 vendor 模块 vermagic（避免 Wi-Fi 模块加载失败）
+          sed -i -E 's/^SUBLEVEL = .*/SUBLEVEL = 117/' Makefile
+          sed -i -E 's/^EXTRAVERSION = .*/EXTRAVERSION =/' Makefile
+          rm -f .scmversion
+
+          if [ "$WITH_SUKISU" = "on" ]; then
+            # non-GKI 使用 manual hook
+            sed -i -E '/^CONFIG_KSU=/d' "${DEFCONFIG_PATH}"
+            sed -i -E '/^# CONFIG_KSU is not set/d' "${DEFCONFIG_PATH}"
+            sed -i -E '/^CONFIG_KSU_MANUAL_HOOK/d' "${DEFCONFIG_PATH}"
+            sed -i -E '/^# CONFIG_KSU_MANUAL_HOOK is not set/d' "${DEFCONFIG_PATH}"
+            sed -i -E '/^CONFIG_KSU_MANUAL_SU/d' "${DEFCONFIG_PATH}"
+            sed -i -E '/^# CONFIG_KSU_MANUAL_SU is not set/d' "${DEFCONFIG_PATH}"
+            printf '%s\n' \
+              'CONFIG_KSU=y' \
+              'CONFIG_KSU_MANUAL_HOOK=y' \
+              '# CONFIG_KSU_MANUAL_SU is not set' \
+              'CONFIG_KPM=y' \
+              'CONFIG_KPROBES=y' \
+              'CONFIG_KRETPROBES=y' \
+              'CONFIG_KPROBE_EVENTS=y' \
+              'CONFIG_KALLSYMS=y' \
+              'CONFIG_KALLSYMS_ALL=y' \
+              'CONFIG_SECURITYFS=y' \
+              'CONFIG_DEVTMPFS=y' \
+              'CONFIG_DEVTMPFS_MOUNT=y' \
+              'CONFIG_OVERLAY_FS=y' \
+              'CONFIG_KSU_SUSFS=y' \
+              'CONFIG_KSU_SUSFS_SUS_KSTAT=y' \
+              'CONFIG_KSU_SUSFS_SPOOF_UNAME=y' \
+              'CONFIG_KSU_SUSFS_ENABLE_LOG=y' \
+              'CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y' \
+              'CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y' \
+              >> "${DEFCONFIG_PATH}"
+          fi
+
+          mkdir -p out
+          make O=out "$DEFCONFIG"
+
+          if [ "$WITH_SUKISU" = "on" ]; then
+            # KernelSU：manual hook 路线
+            ./scripts/config --file out/.config -e KSU || true
+            ./scripts/config --file out/.config -e KSU_MANUAL_HOOK || true
+            ./scripts/config --file out/.config -d KSU_MANUAL_SU || true
+            ./scripts/config --file out/.config -e KPM || true
+            ./scripts/config --file out/.config -e KPROBES || true
+            ./scripts/config --file out/.config -e KRETPROBES || true
+            ./scripts/config --file out/.config -e KPROBE_EVENTS || true
+            ./scripts/config --file out/.config -e KALLSYMS || true
+            ./scripts/config --file out/.config -e KALLSYMS_ALL || true
+            ./scripts/config --file out/.config -e SECURITYFS || true
+            ./scripts/config --file out/.config -e DEVTMPFS || true
+            ./scripts/config --file out/.config -e DEVTMPFS_MOUNT || true
+            ./scripts/config --file out/.config -e OVERLAY_FS || true
+
+            # SUSFS
+            ./scripts/config --file out/.config -e KSU_SUSFS || true
+            ./scripts/config --file out/.config -e KSU_SUSFS_SUS_KSTAT || true
+            ./scripts/config --file out/.config -e KSU_SUSFS_SPOOF_UNAME || true
+            ./scripts/config --file out/.config -e KSU_SUSFS_ENABLE_LOG || true
+            ./scripts/config --file out/.config -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS || true
+            ./scripts/config --file out/.config -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_PATH || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_MOUNT || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_OPEN_REDIRECT || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_SU || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_MAP || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_TRY_UMOUNT || true
+          fi
+
+          # 保持 MODULE_SIG 以对齐 struct module，但关闭强制签名校验
+          ./scripts/config --file out/.config -e MODULE_SIG || true
+          ./scripts/config --file out/.config -d MODULE_SIG_FORCE || true
+          ./scripts/config --file out/.config -d MODULE_SIG_ALL || true
+          # 保持 MODVERSIONS，与 vendor 模块一致
+          ./scripts/config --file out/.config -e MODVERSIONS || true
+
+          # 对齐版本字符串，避免 vermagic 不匹配
+          ./scripts/config --file out/.config -d LOCALVERSION_AUTO || true
+          ./scripts/config --file out/.config --set-str LOCALVERSION "-perf-g4732215-tanran" || true
+
+          FORTIFY="${{ github.event_name == 'workflow_dispatch' && inputs.fortify || 'off' }}"
+          if [ "$FORTIFY" = "on" ]; then
+            ./scripts/config --file out/.config -e FORTIFY_SOURCE || true
+          else
+            # GCC 4.9 下 include/linux/string.h 的 FORTIFY memcpy 会触发 __read_overflow2 编译期错误
+            ./scripts/config --file out/.config -d FORTIFY_SOURCE || true
+          fi
+
+          # 避免 Image.gz 触发 dtb 全量编译（dtc 错误会导致构建失败）
+          ./scripts/config --file out/.config -d BUILD_ARM64_DTBS || true
+          ./scripts/config --file out/.config -d BUILD_ARM64_APPENDED_DTB_IMAGE || true
+
+          make O=out olddefconfig
+
+          if [ "$WITH_SUKISU" = "on" ]; then
+            # olddefconfig 后确认 manual hook 仍保持开启
+            ./scripts/config --file out/.config -e KSU || true
+            ./scripts/config --file out/.config -e KSU_MANUAL_HOOK || true
+            ./scripts/config --file out/.config -d KSU_MANUAL_SU || true
+            ./scripts/config --file out/.config -e KPM || true
+            ./scripts/config --file out/.config -e KPROBES || true
+            ./scripts/config --file out/.config -e KRETPROBES || true
+            ./scripts/config --file out/.config -e KPROBE_EVENTS || true
+            ./scripts/config --file out/.config -e KALLSYMS || true
+            ./scripts/config --file out/.config -e KALLSYMS_ALL || true
+            ./scripts/config --file out/.config -e SECURITYFS || true
+            ./scripts/config --file out/.config -e DEVTMPFS || true
+            ./scripts/config --file out/.config -e DEVTMPFS_MOUNT || true
+            ./scripts/config --file out/.config -e OVERLAY_FS || true
+
+            # SUSFS (second round)
+            ./scripts/config --file out/.config -e KSU_SUSFS || true
+            ./scripts/config --file out/.config -e KSU_SUSFS_SUS_KSTAT || true
+            ./scripts/config --file out/.config -e KSU_SUSFS_SPOOF_UNAME || true
+            ./scripts/config --file out/.config -e KSU_SUSFS_ENABLE_LOG || true
+            ./scripts/config --file out/.config -e KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS || true
+            ./scripts/config --file out/.config -e KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_PATH || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_MOUNT || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_OPEN_REDIRECT || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_SU || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_SUS_MAP || true
+            ./scripts/config --file out/.config -d KSU_SUSFS_TRY_UMOUNT || true
+
+            # 再次确保模块签名/版本字符串设置生效
+            ./scripts/config --file out/.config -e MODULE_SIG || true
+            ./scripts/config --file out/.config -d MODULE_SIG_FORCE || true
+            ./scripts/config --file out/.config -d MODULE_SIG_ALL || true
+            ./scripts/config --file out/.config -e MODVERSIONS || true
+            ./scripts/config --file out/.config -d LOCALVERSION_AUTO || true
+            ./scripts/config --file out/.config --set-str LOCALVERSION "-perf-g4732215-tanran" || true
+
+            make O=out olddefconfig
+
+            if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
+              echo "CONFIG_KSU_MANUAL_HOOK 未开启，停止构建"
+              exit 1
+            fi
+            if ! grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
+              echo "CONFIG_KSU_SUSFS 未开启，停止构建"
+              exit 1
+            fi
+          fi
+
+          # 保持默认版本字符串，避免 vendor 模块 vermagic 不匹配（例如 Wi-Fi 驱动）
+      - name: 编译
+        id: build
+        run: |
+          set -euxo pipefail
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export PATH="$TOOLCHAIN_GCC64/bin:$TOOLCHAIN_GCC32/bin:$PATH"
+          export CROSS_COMPILE="$TOOLCHAIN_GCC64/bin/aarch64-linux-android-"
+          export CROSS_COMPILE_ARM32="$TOOLCHAIN_GCC32/bin/arm-linux-androideabi-"
+          export LOCALVERSION=
+          export KBUILD_BUILD_USER=tanran
+          export KBUILD_BUILD_HOST=laurus
+
+          BUILD_DTBO="${{ github.event_name == 'workflow_dispatch' && inputs.build_dtbo || 'off' }}"
+
+          if [ "$BUILD_DTBO" = "on" ]; then
+            # dtbo (/plugin/;) 需要 -@ 才能生成符号/修复信息
+            make -j"$(nproc)" O=out Image.gz-dtb V=1 DTC_FLAGS="-@" 2>&1 | tee build.log
+          else
+            # 先确保能编译出内核镜像；dtbo 问题后续再单独修
+            make -j"$(nproc)" O=out Image.gz V=1 2>&1 | tee build.log
+
+            mkdir -p dist
+            rm -f dist/dtb
+
+            STOCK_DTB_B64="ci_assets/laurus_q_dtb.bin.gz.b64"
+            if [ -f "${STOCK_DTB_B64}" ]; then
+              # 优先使用 stock dtb blob，避免 trinket dtb 编译失败
+              if gzip -t "${STOCK_DTB_B64}" >/dev/null 2>&1; then
+                gzip -dc "${STOCK_DTB_B64}" > dist/dtb
+              else
+                base64 -d "${STOCK_DTB_B64}" | gzip -d > dist/dtb
+              fi
+            else
+              # 编译 trinket 相关 dtb（失败跳过，后续按 size 白名单拼接）
+              set +e
+              for dts in $(find arch/arm64/boot/dts/qcom -maxdepth 1 -name 'trinket*.dts' ! -name '*-overlay.dts' -print | sort); do
+                dtb="$(basename "${dts%.dts}.dtb")"
+                if make -j"$(nproc)" O=out "qcom/${dtb}" V=1 2>&1 | tee -a build.log; then
+                  echo "built dtb: ${dtb}" | tee -a build.log
+                else
+                  echo "skip dtb build failed: ${dtb}" | tee -a build.log
+                fi
+              done
+              set -e
+
+              # 根据 stock dtb 的 size 列表重建 dtb blob（Q 版本）
+              STOCK_DTB_SIZES=("54743" "33269" "4065" "46749" "5306" "4753" "27379" "327570")
+              tmp_map="$(mktemp)"
+              find out/arch/arm64/boot/dts/qcom -maxdepth 1 -name 'trinket*.dtb' -print0 | xargs -0 -I{} stat -c '%s %n' {} | sort > "${tmp_map}"
+
+              : > dist/dtb
+              for size in "${STOCK_DTB_SIZES[@]}"; do
+                match="$(awk -v s="${size}" '$1==s{print $2; exit}' "${tmp_map}")"
+                if [ -z "${match}" ]; then
+                  echo "missing dtb size: ${size}" | tee -a build.log
+                  exit 1
+                fi
+                cat "${match}" >> dist/dtb
+              done
+              rm -f "${tmp_map}"
+            fi
+
+            # 生成 CC 9e/Trinket 多 DTB Image.gz-dtb（直接用于打包/刷机）
+            cat out/arch/arm64/boot/Image.gz dist/dtb > dist/Image.gz-dtb
+          fi
+
+      - name: 打包 AnyKernel3（可直接刷）
+        id: package
+        if: steps.build.outcome == 'success'
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+
+          # build_dtbo=on 时，尝试复用 out 里生成的 Image.gz-dtb
+          if [ ! -f dist/Image.gz-dtb ] && [ -f out/arch/arm64/boot/Image.gz-dtb ]; then
+            cp -f out/arch/arm64/boot/Image.gz-dtb dist/Image.gz-dtb
+          fi
+
+          test -f dist/Image.gz-dtb
+
+          git clone --depth=1 https://github.com/osm0sis/AnyKernel3 anykernel3
+          cp -f dist/Image.gz-dtb anykernel3/Image.gz-dtb
+
+          # 仅做最小定制：限制设备代号（CC 9e=laurus；同平台 Mi A3=laurel_sprout）
+          sed -i \
+            -e 's/^do.devicecheck=.*/do.devicecheck=1/' \
+            -e 's/^device.name1=.*/device.name1=laurus/' \
+            -e 's/^device.name2=.*/device.name2=laurel_sprout/' \
+            anykernel3/anykernel.sh || true
+
+          (cd anykernel3 && zip -r9 ../dist/AnyKernel3-laurus-${{ github.run_id }}.zip . -x '.git/*')
+
+      - name: 生成 boot.img（可 fastboot 刷入）
+        id: bootimg
+        if: steps.build.outcome == 'success'
+        run: |
+          set -euxo pipefail
+          mkdir -p dist
+          test -f out/arch/arm64/boot/Image.gz
+
+          rm -rf repack
+          mkdir -p repack/out
+          cp -f out/arch/arm64/boot/Image.gz repack/out/kernel
+          : > repack/out/ramdisk
+
+          test -f dist/dtb
+          cp -f dist/dtb repack/out/dtb
+          ls -lh dist/dtb repack/out/dtb
+
+          # 使用仓库自带 mkbootimg.py 生成 boot.img
+          test -f tools/mkbootimg.py
+
+          CMDLINE="console=ttyMSM0,115200n8 androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 video=vfb:640x400,bpp=32,memsize=3072000 msm_rtb.filter=0x237 service_locator.enable=1 swiotlb=1 earlycon=msm_geni_serial,0x4a90000 loop.max_part=7 cgroup.memory=nokmem,nosocket androidboot.selinux=enforcing buildvariant=user"
+
+          (cd repack && python3 ../tools/mkbootimg.py \
+            --header_version 2 \
+            --os_version 10.0.0 \
+            --os_patch_level 2021-09 \
+            --kernel out/kernel \
+            --ramdisk out/ramdisk \
+            --dtb out/dtb \
+            --pagesize 0x00001000 \
+            --base 0x00000000 \
+            --kernel_offset 0x00008000 \
+            --ramdisk_offset 0x01000000 \
+            --second_offset 0x00f00000 \
+            --tags_offset 0x00000100 \
+            --dtb_offset 0x0000000001f00000 \
+            --board "" \
+            --cmdline "$CMDLINE" \
+            -o ../dist/boot.img)
+
+          # laurus boot 分区固定 64MB，做一次 truncate 与 stock 对齐
+          truncate -s 64M dist/boot.img
+          ls -lh dist/boot.img
+
+      - name: KPM 注入（kptools patch kernel → rebuild boot_kpm.img）
+        id: kpm
+        if: steps.bootimg.outcome == 'success' && github.event_name == 'workflow_dispatch' && inputs.kpm == 'on'
+        run: |
+          set -euxo pipefail
+          SUPERKEY="${{ inputs.superkey }}"
+          if [ -z "$SUPERKEY" ]; then
+            echo "ERROR: kpm=on but superkey is empty"
+            exit 1
+          fi
+
+          KPP_REPO="SukiSU-Ultra/SukiSU_KernelPatch_patch"
+          KPP_TAG="0.13.0"
+          KPP_BASE="https://github.com/${KPP_REPO}/releases/download/${KPP_TAG}"
+
+          curl -fSL "${KPP_BASE}/kptools-linux" -o kptools-linux
+          curl -fSL "${KPP_BASE}/kpimg" -o kpimg
+          chmod +x kptools-linux
+
+          # kptools 需要原始未压缩 Image（ARM64 magic），不能直接处理 boot.img
+          test -f out/arch/arm64/boot/Image
+          ./kptools-linux -p \
+            -i out/arch/arm64/boot/Image \
+            -k kpimg \
+            -s "$SUPERKEY" \
+            -o kpm_patched_Image
+
+          # 压缩 + 重建 boot_kpm.img
+          gzip -c kpm_patched_Image > repack/out/kernel
+
+          CMDLINE="console=ttyMSM0,115200n8 androidboot.hardware=qcom androidboot.console=ttyMSM0 androidboot.memcg=1 lpm_levels.sleep_disabled=1 video=vfb:640x400,bpp=32,memsize=3072000 msm_rtb.filter=0x237 service_locator.enable=1 swiotlb=1 earlycon=msm_geni_serial,0x4a90000 loop.max_part=7 cgroup.memory=nokmem,nosocket androidboot.selinux=enforcing buildvariant=user"
+
+          (cd repack && python3 ../tools/mkbootimg.py \
+            --header_version 2 \
+            --os_version 10.0.0 \
+            --os_patch_level 2021-09 \
+            --kernel out/kernel \
+            --ramdisk out/ramdisk \
+            --dtb out/dtb \
+            --pagesize 0x00001000 \
+            --base 0x00000000 \
+            --kernel_offset 0x00008000 \
+            --ramdisk_offset 0x01000000 \
+            --second_offset 0x00f00000 \
+            --tags_offset 0x00000100 \
+            --dtb_offset 0x0000000001f00000 \
+            --board "" \
+            --cmdline "$CMDLINE" \
+            -o ../dist/boot_kpm.img)
+
+          truncate -s 64M dist/boot_kpm.img
+          ls -lh dist/boot.img dist/boot_kpm.img
+
+      - name: 写入精简日志（方便无鉴权查看）
+        if: always()
+        run: |
+          set -euxo pipefail
+          mkdir -p ci_logs
+          outfile="ci_logs/${{ github.run_id }}.txt"
+          {
+            echo "run_id=${{ github.run_id }}"
+            echo "head_sha=${{ github.sha }}"
+            echo "kernel_ref=${{ github.event_name == 'workflow_dispatch' && inputs.kernel_branch || 'laurus-q-oss-ci' }}"
+            echo "defconfig=${{ github.event_name == 'workflow_dispatch' && inputs.defconfig || 'vendor/laurus-perf_defconfig' }}"
+            echo "fortify=${{ github.event_name == 'workflow_dispatch' && inputs.fortify || 'off' }}"
+            echo "build_dtbo=${{ github.event_name == 'workflow_dispatch' && inputs.build_dtbo || 'off' }}"
+            echo "with_sukisu=${WITH_SUKISU}"
+            echo "kpm=${{ github.event_name == 'workflow_dispatch' && inputs.kpm || 'off' }}"
+            echo
+            echo "==== step outcomes ===="
+            echo "checkout=${{ steps.checkout.outcome }}"
+            echo "deps=${{ steps.deps.outcome }}"
+            echo "toolchain=${{ steps.toolchain.outcome }}"
+            echo "sukisu=${{ steps.sukisu.outcome }}"
+            echo "config=${{ steps.config.outcome }}"
+            echo "build=${{ steps.build.outcome }}"
+            echo "package=${{ steps.package.outcome }}"
+            echo "bootimg=${{ steps.bootimg.outcome }}"
+            echo "kpm=${{ steps.kpm.outcome }}"
+            echo
+            echo "==== ksu config snapshot (out/.config) ===="
+            if [ -f out/.config ]; then
+              grep -nE "KSU|KPM|SUSFS|KPROBES|KRETPROBES|KPROBES_ON_FTRACE|KPROBE_EVENTS|KALLSYMS|FTRACE" out/.config 2>&1 | head -n 200 || true
+            else
+              echo "out/.config not found"
+            fi
+            echo
+            echo "==== artifacts existence ===="
+            ls -l build.log 2>&1 || true
+            ls -l out/arch/arm64/boot/Image.gz-dtb out/arch/arm64/boot/Image.gz out/arch/arm64/boot/dts/qcom/trinket.dtb 2>&1 || true
+            ls -l dist/Image.gz-dtb dist/AnyKernel3-laurus-${{ github.run_id }}.zip dist/boot.img 2>&1 || true
+            echo
+            echo "==== build.log errors (tail 200) ===="
+            grep -nE "error:|fatal error:" build.log 2>&1 | tail -n 200 || true
+            echo
+            echo "==== make failures (tail 120) ===="
+            grep -nE "make(\[[0-9]+\])?: \*\*\*|make: \*\*\*|Error [0-9]+" build.log 2>&1 | tail -n 120 || true
+            echo
+            echo "==== dtc/dts errors (tail 200) ===="
+            grep -nE "FATAL ERROR|syntax error|parse error|Error:" build.log 2>&1 | tail -n 200 || true
+            echo
+            echo "==== forbidden warnings (tail 80) ===="
+            grep -n "warn, forbidden warning" build.log 2>&1 | tail -n 80 || true
+            echo
+            echo "==== bad_copy / fortify hits (head 200) ===="
+            grep -nE "__bad_copy_(to|from)|copy (source|destination) size is too small|__compiletime_error\(\"copy (source|destination) size is too small\"\)|__read_overflow2|FORTIFY|__check_object_size" build.log 2>&1 | head -n 200 || true
+            echo
+            echo "==== bad_copy context (first 3 hits, each +/-60 lines) ===="
+            hits="$(grep -nE "__bad_copy_(to|from)" build.log 2>/dev/null | head -n 3 | cut -d: -f1 | tr '\n' ' ' || true)"
+            if [ -n "${hits}" ]; then
+              for n in ${hits}; do
+                start=$((n-60)); end=$((n+60)); if [ "$start" -lt 1 ]; then start=1; fi
+                echo "--- context around build.log:$n (lines $start-$end) ---"
+                sed -n "${start},${end}p" build.log 2>&1 || true
+                echo
+              done
+            else
+              echo "(no __bad_copy_* strings found in build.log)"
+            fi
+            echo
+            echo "==== tail build.log (last 1200) ===="
+            tail -n 1200 build.log 2>&1 || true
+          } > "$outfile"
+
+          cp -f "$outfile" ci_logs/latest.txt
+          echo "Wrote $outfile"
+
+      - name: 上传产物（无论成功失败）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: laurus-${{ github.run_id }}
+          include-hidden-files: true
+          if-no-files-found: warn
+          path: |
+            build.log
+            ci_logs/latest.txt
+            out/.config
+            out/arch/arm64/boot/Image.gz-dtb
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/dts/qcom/trinket.dtb
+            dist/Image.gz-dtb
+            dist/AnyKernel3-laurus-${{ github.run_id }}.zip
+            dist/boot.img
+            dist/boot_kpm.img
