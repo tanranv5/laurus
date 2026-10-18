@@ -247,6 +247,21 @@ jobs:
           '''
               p.write_text(head + s + "\n#endif /* KSU_SECCOMP_STUB */\n")
               print("patched infra/seccomp_cache.c: stub for < 5.5")
+
+          # 4.14 没有 fsnotify inode event API（handle_inode_event 是 5.9+）
+          p = d / "manager/pkg_observer.c"
+          s = p.read_text()
+          if "KSU_PKG_OBSERVER_STUB" not in s:
+              head = '''#include <linux/version.h>
+
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 9, 0) /* KSU_PKG_OBSERVER_STUB */
+          int ksu_observer_init(void) { return 0; }
+          void ksu_observer_exit(void) { }
+
+          #else
+          '''
+              p.write_text(head + s + "\n#endif /* KSU_PKG_OBSERVER_STUB */\n")
+              print("patched manager/pkg_observer.c: stub for < 5.9")
           PYEOF
 
           # 4.14 缺 nofault 系列（5.8+ 才有），补一个强制包含的兼容头
