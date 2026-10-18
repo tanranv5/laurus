@@ -191,6 +191,26 @@ jobs:
               if t != o:
                   f.write_text(t)
                   print("patched header includes:", f)
+
+          p = d / "hook/lsm_hook.c"
+          s = p.read_text()
+          if "KSU_LSM_HOOK_STUB" not in s:
+              anchor = '#include "klog.h" // IWYU pragma: keep\n'
+              if anchor in s:
+                  stub = anchor + '''
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 7, 0) /* KSU_LSM_HOOK_STUB */
+          /* 4.14 的 security_hook_heads 是 list_head 链表，hlist 补丁逻辑不适用 */
+          int ksu_lsm_hook(struct ksu_lsm_hook *hook) { return -ENOSYS; }
+          void ksu_lsm_unhook(struct ksu_lsm_hook *hook) { }
+          int ksu_register_lsm_hook(struct ksu_lsm_hook *hook) { return -ENOSYS; }
+          void ksu_unregister_lsm_hook(struct ksu_lsm_hook *hook) { }
+          void ksu_lsm_hook_init(void) { }
+          void ksu_lsm_hook_exit(void) { }
+          #else
+          '''
+                  s = s.replace(anchor, stub, 1) + "\n#endif /* KSU_LSM_HOOK_STUB */\n"
+                  p.write_text(s)
+                  print("patched hook/lsm_hook.c: stub for < 5.7")
           PYEOF
 
           # 4.14 缺 nofault 系列（5.8+ 才有），补一个强制包含的兼容头
