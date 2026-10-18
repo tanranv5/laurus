@@ -852,7 +852,7 @@ jobs:
             sed -i -E '/^CONFIG_KPM/d' "${DEFCONFIG_PATH}"
             printf '%s\n' \
               'CONFIG_KSU=y' \
-              'CONFIG_KPM=y' \
+              '# CONFIG_KPM is not set' \
               'CONFIG_KPROBES=y' \
               'CONFIG_KRETPROBES=y' \
               'CONFIG_KPROBE_EVENTS=y' \
@@ -876,7 +876,8 @@ jobs:
             else
               ./scripts/config --file out/.config -m KSU || true
             fi
-            ./scripts/config --file out/.config -e KPM || true
+            # KPM 的 kpm.c 用了 5.x 的 access_ok 两参数形式，4.14 上编译不过
+            ./scripts/config --file out/.config -d KPM || true
             ./scripts/config --file out/.config -e KPROBES || true
             ./scripts/config --file out/.config -e KRETPROBES || true
             ./scripts/config --file out/.config -e KPROBE_EVENTS || true
@@ -921,7 +922,8 @@ jobs:
             else
               ./scripts/config --file out/.config -m KSU || true
             fi
-            ./scripts/config --file out/.config -e KPM || true
+            # KPM 的 kpm.c 用了 5.x 的 access_ok 两参数形式，4.14 上编译不过
+            ./scripts/config --file out/.config -d KPM || true
             ./scripts/config --file out/.config -e KPROBES || true
             ./scripts/config --file out/.config -e KRETPROBES || true
             ./scripts/config --file out/.config -e KPROBE_EVENTS || true
