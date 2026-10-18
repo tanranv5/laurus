@@ -193,6 +193,91 @@ jobs:
                   print("patched header includes:", f)
           PYEOF
 
+          # 4.14 缺 nofault 系列（5.8+ 才有），补一个强制包含的兼容头
+          cat > /tmp/ksu_compat_414.h <<'CEOF'
+          #ifndef __KSU_COMPAT_414_H
+          #define __KSU_COMPAT_414_H
+
+          #include <linux/version.h>
+
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 8, 0)
+
+          #include <linux/mm.h>
+          #include <linux/sched.h>
+          #include <linux/uaccess.h>
+
+          static inline long ksu_copy_from_user_nofault(void *dst, const void __user *src,
+                                                       unsigned long size)
+          {
+          	long ret;
+          	mm_segment_t old_fs = get_fs();
+
+          	set_fs(USER_DS);
+          	pagefault_disable();
+          	ret = __copy_from_user_inatomic(dst, src, size);
+          	pagefault_enable();
+          	set_fs(old_fs);
+
+          	return ret ? -EFAULT : 0;
+          }
+
+          static inline long ksu_copy_to_user_nofault(void __user *dst, const void *src,
+                                                     unsigned long size)
+          {
+          	long ret;
+          	mm_segment_t old_fs = get_fs();
+
+          	set_fs(USER_DS);
+          	pagefault_disable();
+          	ret = __copy_to_user_inatomic(dst, src, size);
+          	pagefault_enable();
+          	set_fs(old_fs);
+
+          	return ret ? -EFAULT : 0;
+          }
+
+          static inline long ksu_strncpy_from_user_nofault(char *dst, const void __user *src,
+                                                          long count)
+          {
+          	long ret;
+          	mm_segment_t old_fs = get_fs();
+
+          	set_fs(USER_DS);
+          	pagefault_disable();
+          	ret = strncpy_from_user(dst, src, count);
+          	pagefault_enable();
+          	set_fs(old_fs);
+
+          	return ret < 0 ? -EFAULT : ret;
+          }
+
+          #define copy_from_user_nofault ksu_copy_from_user_nofault
+          #define copy_to_user_nofault ksu_copy_to_user_nofault
+          #define strncpy_from_user_nofault ksu_strncpy_from_user_nofault
+
+          #endif /* < 5.8 */
+          #endif /* __KSU_COMPAT_414_H */
+          CEOF
+
+          mkdir -p "${ksu_dir}/include"
+          cp /tmp/ksu_compat_414.h "${ksu_dir}/include/ksu_compat_414.h"
+
+          python3 - "${ksu_dir}" <<'PYEOF'
+          import sys
+          from pathlib import Path
+
+          kb = Path(sys.argv[1]) / "Kbuild"
+          s = kb.read_text()
+          anchor = "ccflags-y += -I$(KSU_KERNEL_DIR) -I$(KSU_KERNEL_DIR)/include\n"
+          if "ksu_compat_414.h" not in s and anchor in s:
+              s = s.replace(
+                  anchor,
+                  anchor + "ccflags-y += -include $(KSU_KERNEL_DIR)/include/ksu_compat_414.h\n",
+                  1)
+              kb.write_text(s)
+              print("patched Kbuild: force include ksu_compat_414.h")
+          PYEOF
+
           if [ ! -f "${ksu_dir}/ksud.c" ]; then
             echo "v4.2.1 layout (no ksud.c) -> skip legacy patches"
             exit 0
