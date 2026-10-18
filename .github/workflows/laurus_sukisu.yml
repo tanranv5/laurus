@@ -174,6 +174,28 @@ jobs:
               txt = path.read_text()
               if "KERNEL_VERSION(4, 17, 0)" in txt:
                   return True
+              # 3.x 布局：5 个 SYMBOL 连续定义，4.17 前 arm64 符号名没有 __arm64_ 前缀
+              old3 = (
+                  '#define PRCTL_SYMBOL "__arm64_sys_prctl"\n'
+                  '#define SYS_READ_SYMBOL "__arm64_sys_read"\n'
+                  '#define SYS_NEWFSTATAT_SYMBOL "__arm64_sys_newfstatat"\n'
+                  '#define SYS_FACCESSAT_SYMBOL "__arm64_sys_faccessat"\n'
+                  '#define SYS_EXECVE_SYMBOL "__arm64_sys_execve"\n'
+              )
+              if old3 in txt:
+                  new3 = (
+                      '#if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 17, 0)\n'
+                      + old3 +
+                      '#else\n'
+                      '#define PRCTL_SYMBOL "sys_prctl"\n'
+                      '#define SYS_READ_SYMBOL "sys_read"\n'
+                      '#define SYS_NEWFSTATAT_SYMBOL "sys_newfstatat"\n'
+                      '#define SYS_FACCESSAT_SYMBOL "sys_faccessat"\n'
+                      '#define SYS_EXECVE_SYMBOL "sys_execve"\n'
+                      '#endif\n'
+                  )
+                  path.write_text(txt.replace(old3, new3, 1))
+                  return True
               old = (
                   '#define REBOOT_SYMBOL "__arm64_sys_reboot"\n'
                   '#define SYS_READ_SYMBOL "__arm64_sys_read"\n'
