@@ -338,6 +338,28 @@ jobs:
           #define __flush_icache_range(start, end) flush_icache_range(start, end)
           #endif
 
+          #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 17, 0)
+          #include <linux/nsproxy.h>
+          #include <linux/sched/task.h>
+          static inline long ksu_unshare_mntns_414(unsigned long flags)
+          {
+          	struct nsproxy *new_nsproxy = NULL;
+          	int err;
+
+          	if (flags != CLONE_NEWNS)
+          		return -EINVAL;
+
+          	err = unshare_nsproxy_namespaces(CLONE_NEWNS, &new_nsproxy, NULL, NULL);
+          	if (err)
+          		return err;
+
+          	switch_task_namespaces(current, new_nsproxy);
+          	put_nsproxy(new_nsproxy);
+          	return 0;
+          }
+          #define ksys_unshare(flags) ksu_unshare_mntns_414(flags)
+          #endif
+
           #endif /* __KSU_COMPAT_414_H */
           CEOF
 
