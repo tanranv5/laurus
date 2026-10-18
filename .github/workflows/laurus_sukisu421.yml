@@ -144,6 +144,9 @@ jobs:
             ksu_dir="drivers/kernelsu"
           fi
 
+          # 以下 shim 只针对 4.x（5.x 代码基线），3.x 自带老内核兼容层
+          if [ "${ref#v4.}" != "${ref}" ]; then
+
           # v4.2.1 代码面向 5.x，4.14 缺 syscall_fn_t / MODULE_IMPORT_NS，打兼容 shim
           python3 - "${ksu_dir}" <<'PYEOF'
           import sys
@@ -396,6 +399,14 @@ jobs:
               kb.write_text(s)
               print("patched Kbuild: force include ksu_compat_414.h")
           PYEOF
+
+          fi # end of v4.x shims
+
+          # 3.x 用自身 kprobes hook，不需要 4.x 那套 manual hook 定制补丁
+          if [ "${ref#v4.}" = "${ref}" ]; then
+            echo "SukiSU ${ref}: 3.x layout, skip manual-hook patches"
+            exit 0
+          fi
 
           if [ ! -f "${ksu_dir}/ksud.c" ]; then
             echo "v4.2.1 layout (no ksud.c) -> skip legacy patches"
