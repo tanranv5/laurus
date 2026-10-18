@@ -818,6 +818,30 @@ jobs:
 
           echo "SUSFS v2.0.0 minimal integration complete"
 
+      - name: 4.14 兼容补丁（SUSFS kuid）
+        id: compat414
+        run: |
+          set -euxo pipefail
+          f="include/linux/susfs_def.h"
+          if [ ! -f "$f" ]; then
+            echo "$f not found, skip"
+            exit 0
+          fi
+          python3 - "$f" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          n1 = len(re.findall(r"current_(u|e|f)id\(\)\.val", s))
+          s = re.sub(r"current_(u|e|f)id\(\)\.val", r"__kuid_val(current_\1id())", s)
+          n2 = len(re.findall(r"current_(u|e|f)gid\(\)\.val", s))
+          s = re.sub(r"current_(u|e|f)gid\(\)\.val", r"__kgid_val(current_\1gid())", s)
+          p.write_text(s)
+          print(f"susfs_def.h patched: uid={n1}, gid={n2}")
+          PY
+
       - name: 配置 defconfig
         id: config
         run: |
