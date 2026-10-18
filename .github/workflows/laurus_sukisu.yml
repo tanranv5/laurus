@@ -972,9 +972,14 @@ jobs:
 
             make O=out olddefconfig
 
-            if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
-              echo "CONFIG_KSU_MANUAL_HOOK 未开启，停止构建"
-              exit 1
+            # v4.1.2 的 Kconfig 没有 KSU_MANUAL_HOOK（走 syscall hook），仅在该选项存在时校验
+            if grep -rq 'config KSU_MANUAL_HOOK' drivers/kernelsu/Kconfig common/drivers/kernelsu/Kconfig 2>/dev/null; then
+              if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
+                echo "CONFIG_KSU_MANUAL_HOOK 未开启，停止构建"
+                exit 1
+              fi
+            else
+              echo "当前 SukiSU 无 KSU_MANUAL_HOOK 选项（v4.1.2 使用 syscall hook），跳过校验"
             fi
             if ! grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
               echo "CONFIG_KSU_SUSFS 未开启，停止构建"
