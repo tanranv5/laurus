@@ -834,10 +834,11 @@ jobs:
 
           p = Path(sys.argv[1])
           s = p.read_text()
+          # 4.14 的 current_uid() 直接返回 uid 数值（kuid_t 即 uid_t），没有 .val
           n1 = len(re.findall(r"current_(u|e|f)id\(\)\.val", s))
-          s = re.sub(r"current_(u|e|f)id\(\)\.val", r"__kuid_val(current_\1id())", s)
+          s = re.sub(r"current_(u|e|f)id\(\)\.val", r"current_\1id()", s)
           n2 = len(re.findall(r"current_(u|e|f)gid\(\)\.val", s))
-          s = re.sub(r"current_(u|e|f)gid\(\)\.val", r"__kgid_val(current_\1gid())", s)
+          s = re.sub(r"current_(u|e|f)gid\(\)\.val", r"current_\1gid()", s)
           p.write_text(s)
           print(f"susfs_def.h patched: uid={n1}, gid={n2}")
           PY
