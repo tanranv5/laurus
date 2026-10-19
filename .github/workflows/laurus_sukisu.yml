@@ -133,13 +133,17 @@ jobs:
           # SukiSU 官方脚本：第一个参数是 tag/commit，必须传 ref（传 mode 会 checkout 失败退到 main）
           curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${ref}/kernel/setup.sh" | bash -s "$ref"
 
-          # 应用 manual hook 补丁（4.14）
-          patch_url="https://raw.githubusercontent.com/rksuorg/kernel_patches/master/manual_hook/kernel-4.14.patch"
-          curl -fsSL "$patch_url" -o /tmp/ksu_manual_hook.patch
-          if git apply --reverse --check /tmp/ksu_manual_hook.patch; then
-            echo "manual hook patch already applied"
+          # 应用 manual hook 补丁（仅当该 SukiSU 版本提供 KSU_MANUAL_HOOK 时；4.1.2 起改走 syscall hook）
+          if find . -path "*kernelsu/Kconfig" -exec grep -l 'config KSU_MANUAL_HOOK' {} \; 2>/dev/null | grep -q .; then
+            patch_url="https://raw.githubusercontent.com/rksuorg/kernel_patches/master/manual_hook/kernel-4.14.patch"
+            curl -fsSL "$patch_url" -o /tmp/ksu_manual_hook.patch
+            if git apply --reverse --check /tmp/ksu_manual_hook.patch; then
+              echo "manual hook patch already applied"
+            else
+              git apply /tmp/ksu_manual_hook.patch
+            fi
           else
-            git apply /tmp/ksu_manual_hook.patch
+            echo "当前 SukiSU 无 KSU_MANUAL_HOOK，跳过 manual hook 补丁"
           fi
 
           # 补齐 manual hook 适配符号，避免链接错误
@@ -995,9 +999,13 @@ jobs:
 
             make O=out olddefconfig
 
-            if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
-              echo "CONFIG_KSU_MANUAL_HOOK 未开启，停止构建"
-              exit 1
+            if find . -path "*kernelsu/Kconfig" -exec grep -l 'config KSU_MANUAL_HOOK' {} \; 2>/dev/null | grep -q .; then
+              if ! grep -q '^CONFIG_KSU_MANUAL_HOOK=y' out/.config; then
+                echo "CONFIG_KSU_MANUAL_HOOK 未开启，停止构建"
+                exit 1
+              fi
+            else
+              echo "当前 SukiSU 无 KSU_MANUAL_HOOK 选项（走 syscall hook），跳过校验"
             fi
             if ! grep -q '^CONFIG_KSU_SUSFS=y' out/.config; then
               echo "CONFIG_KSU_SUSFS 未开启，停止构建"
