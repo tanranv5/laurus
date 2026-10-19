@@ -12,9 +12,9 @@ name: build-laurus-sukisu
         required: true
         default: "vendor/laurus-perf_defconfig"
       sukisu_ref:
-        description: "SukiSU Ultra 引用（分支/标签/commit，已钉死，勿改）"
+        description: "SukiSU Ultra 引用（分支/标签/commit）"
         required: true
-        default: "0c874e16534b9654f220428db9807485b476180c"
+        default: "main"
       sukisu_mode:
         description: "SukiSU 集成模式：builtin 更适合非 GKI/老内核"
         required: true
@@ -127,11 +127,11 @@ jobs:
             exit 0
           fi
 
-          ref="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_ref || '0c874e16534b9654f220428db9807485b476180c' }}"
+          ref="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_ref || 'main' }}"
           mode="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_mode || 'builtin' }}"
 
           # SukiSU 官方脚本
-          curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${ref}/kernel/setup.sh" | bash -s "$ref"
+          curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${ref}/kernel/setup.sh" | bash -s "$mode"
 
           # 应用 manual hook 补丁（4.14）
           patch_url="https://raw.githubusercontent.com/rksuorg/kernel_patches/master/manual_hook/kernel-4.14.patch"
@@ -818,31 +818,6 @@ jobs:
 
           echo "SUSFS v2.0.0 minimal integration complete"
 
-      - name: 4.14 兼容补丁（SUSFS kuid）
-        id: compat414
-        run: |
-          set -euxo pipefail
-          f="include/linux/susfs_def.h"
-          if [ ! -f "$f" ]; then
-            echo "$f not found, skip"
-            exit 0
-          fi
-          python3 - "$f" <<'PY'
-          import re
-          import sys
-          from pathlib import Path
-
-          p = Path(sys.argv[1])
-          s = p.read_text()
-          # 4.14 的 current_uid() 直接返回 uid 数值（kuid_t 即 uid_t），没有 .val
-          n1 = len(re.findall(r"current_(u|e|f)id\(\)\.val", s))
-          s = re.sub(r"current_(u|e|f)id\(\)\.val", r"current_\1id()", s)
-          n2 = len(re.findall(r"current_(u|e|f)gid\(\)\.val", s))
-          s = re.sub(r"current_(u|e|f)gid\(\)\.val", r"current_\1gid()", s)
-          p.write_text(s)
-          print(f"susfs_def.h patched: uid={n1}, gid={n2}")
-          PY
-
       - name: 配置 defconfig
         id: config
         run: |
@@ -879,7 +854,7 @@ jobs:
               'CONFIG_KSU=y' \
               'CONFIG_KSU_MANUAL_HOOK=y' \
               '# CONFIG_KSU_MANUAL_SU is not set' \
-              '# CONFIG_KPM is not set' \
+              'CONFIG_KPM=y' \
               'CONFIG_KPROBES=y' \
               'CONFIG_KRETPROBES=y' \
               'CONFIG_KPROBE_EVENTS=y' \
@@ -906,7 +881,7 @@ jobs:
             ./scripts/config --file out/.config -e KSU || true
             ./scripts/config --file out/.config -e KSU_MANUAL_HOOK || true
             ./scripts/config --file out/.config -d KSU_MANUAL_SU || true
-            ./scripts/config --file out/.config -d KPM || true
+            ./scripts/config --file out/.config -e KPM || true
             ./scripts/config --file out/.config -e KPROBES || true
             ./scripts/config --file out/.config -e KRETPROBES || true
             ./scripts/config --file out/.config -e KPROBE_EVENTS || true
@@ -962,7 +937,7 @@ jobs:
             ./scripts/config --file out/.config -e KSU || true
             ./scripts/config --file out/.config -e KSU_MANUAL_HOOK || true
             ./scripts/config --file out/.config -d KSU_MANUAL_SU || true
-            ./scripts/config --file out/.config -d KPM || true
+            ./scripts/config --file out/.config -e KPM || true
             ./scripts/config --file out/.config -e KPROBES || true
             ./scripts/config --file out/.config -e KRETPROBES || true
             ./scripts/config --file out/.config -e KPROBE_EVENTS || true
