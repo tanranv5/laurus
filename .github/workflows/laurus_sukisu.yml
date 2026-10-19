@@ -130,8 +130,8 @@ jobs:
           ref="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_ref || 'main' }}"
           mode="${{ github.event_name == 'workflow_dispatch' && inputs.sukisu_mode || 'builtin' }}"
 
-          # SukiSU 官方脚本
-          curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${ref}/kernel/setup.sh" | bash -s "$mode"
+          # SukiSU 官方脚本：第一个参数是 tag/commit，必须传 ref（传 mode 会 checkout 失败退到 main）
+          curl -fsSL "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/${ref}/kernel/setup.sh" | bash -s "$ref"
 
           # 应用 manual hook 补丁（4.14）
           patch_url="https://raw.githubusercontent.com/rksuorg/kernel_patches/master/manual_hook/kernel-4.14.patch"
