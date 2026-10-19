@@ -818,6 +818,29 @@ jobs:
 
           echo "SUSFS v2.0.0 minimal integration complete"
 
+      - name: 4.14 kuid 兼容（SUSFS）
+        id: kuidcompat
+        run: |
+          set -euxo pipefail
+          f="include/linux/susfs_def.h"
+          if [ ! -f "$f" ]; then
+            echo "$f not found, skip"
+            exit 0
+          fi
+          python3 - "$f" <<'PY'
+          import sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1])
+          s = p.read_text()
+          # fs/susfs.c 里 kuid_t 是 struct，drivers/kernelsu/ksuinit.c 里被 KSU 兼容层当成标量，
+          # 同一份头文件两边写法必然有一边编不过；SUS_PATH/SUS_MOUNT 已关闭，这里退化为常量
+          n = s.count("current_uid().val")
+          s = s.replace("current_uid().val", "0")
+          p.write_text(s)
+          print("susfs_def.h kuid compat replaced:", n)
+          PY
+
       - name: 配置 defconfig
         id: config
         run: |
